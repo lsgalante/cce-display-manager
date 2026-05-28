@@ -90,68 +90,7 @@ fn make_text_buffer(font_system: &mut FontSystem, text: &str, size: f32) -> Buff
     buffer
 }
 
-// ── Custom PasswordBox Widget ──
-#[derive(Debug, Clone)]
-pub struct PasswordBox {
-    textbox: TextBox,
-}
 
-impl PasswordBox {
-    pub fn new(text: String) -> Self {
-        Self {
-            textbox: TextBox::new(text),
-        }
-    }
-
-    pub fn with_label(mut self, label: &str) -> Self {
-        self.textbox = self.textbox.with_label(label);
-        self
-    }
-
-    pub fn text(&self) -> String {
-        self.textbox.text.clone()
-    }
-}
-
-impl Widget for PasswordBox {
-    fn rect(&self) -> (f32, f32, f32, f32) { self.textbox.rect() }
-    fn set_rect(&mut self, x: f32, y: f32, w: f32, h: f32) { self.textbox.set_rect(x, y, w, h); }
-    fn set_row_rect(&mut self, x: f32, w: f32) { self.textbox.set_row_rect(x, w); }
-    fn set_hovered(&mut self, v: bool) { self.textbox.set_hovered(v); }
-    fn hovered(&self) -> bool { self.textbox.hovered() }
-    fn color(&self) -> [f32; 4] { self.textbox.color() }
-    fn hit_test(&self, px: f32, py: f32) -> bool { self.textbox.hit_test(px, py) }
-    fn top_room(&self) -> f32 { self.textbox.top_room() }
-    fn cursor_moved(&mut self, px: f32, py: f32) -> bool { self.textbox.cursor_moved(px, py) }
-    fn draggable(&self) -> bool { self.textbox.draggable() }
-    fn is_dragging(&self) -> bool { self.textbox.is_dragging() }
-    fn widget_font(&self) -> Option<String> { self.textbox.widget_font() }
-    fn drag_begin(&mut self, px: f32, py: f32) { self.textbox.drag_begin(px, py); }
-    fn drag_update(&mut self, px: f32, py: f32) -> bool { self.textbox.drag_update(px, py) }
-    fn drag_end(&mut self) { self.textbox.drag_end(); }
-    fn focus(&mut self) { self.textbox.focus(); }
-    fn unfocus(&mut self) { self.textbox.unfocus(); }
-    fn keyboard_input(&mut self, event: &KeyEvent) -> bool { self.textbox.keyboard_input(event) }
-    fn extra_quads(&self) -> Vec<(f32, f32, f32, f32, [f32; 4])> { self.textbox.extra_quads() }
-    fn mouse_input(&mut self, button: MouseButton, state: ElementState, px: f32, py: f32) -> bool {
-        self.textbox.mouse_input(button, state, px, py)
-    }
-    fn visible(&self) -> bool { self.textbox.visible() }
-    fn set_visible(&mut self, visible: bool) { self.textbox.set_visible(visible); }
-
-    fn text_labels(&self) -> Vec<TextLabel> {
-        let mut labels = self.textbox.text_labels();
-        if let Some(val_label) = labels.last_mut() {
-            let val_text = if self.textbox.editing {
-                &self.textbox.edit_buffer
-            } else {
-                &self.textbox.text
-            };
-            val_label.text = "•".repeat(val_text.chars().count());
-        }
-        labels
-    }
-}
 
 // ── Custom LoginCard Container Widget ──
 #[derive(Debug, Clone)]
@@ -252,7 +191,7 @@ struct State {
     bg: ContentBg,
     card: LoginCard,
     username_box: TextBox,
-    password_box: PasswordBox,
+    password_box: TextBox,
     session_btn: Button,
     login_btn: Button,
     status_lbl: StatusLabel,
@@ -370,7 +309,7 @@ impl State {
         let bg = ContentBg::new();
         let card = LoginCard::new();
         let username_box = TextBox::new(current_user).with_label("USERNAME");
-        let password_box = PasswordBox::new(String::new()).with_label("PASSWORD");
+        let password_box = TextBox::new(String::new()).with_password(true).with_label("PASSWORD");
         let session_btn = Button::new(0.0, 0.0, 130.0, 32.0).with_label("Session: River WM");
         let login_btn = Button::new(0.0, 0.0, 130.0, 32.0).with_label("Log In");
         let status_lbl = StatusLabel::new("Enter password to start".to_string());
@@ -880,7 +819,7 @@ impl PointerHandler for AppState {
                             if st.login_btn.take_click() {
                                 // Extract login username and password
                                 let username = st.username_box.text.trim().to_string();
-                                let password = st.password_box.text();
+                                let password = st.password_box.text.trim().to_string();
 
                                 if username.is_empty() {
                                     st.status_lbl.text = "Username cannot be empty".to_string();
