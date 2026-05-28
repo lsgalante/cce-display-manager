@@ -1,0 +1,20 @@
+[Unit]
+Description=Clear Display Manager
+After=systemd-user-sessions.service plymouth-quit-active.service
+Conflicts=getty@tty7.service
+Before=graphical.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/clear-display-manager
+StandardInput=tty
+StandardOutput=tty
+TTYPath=/dev/tty7
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+UtmpIdentifier=tty7
+UtmpType=user_process
+
+[Install]
+WantedBy=graphical.target

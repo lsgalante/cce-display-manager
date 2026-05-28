@@ -1079,7 +1079,7 @@ delegate_keyboard!(AppState);
 delegate_registry!(AppState);
 delegate_output!(AppState);
 
-fn main() {
+fn run_greeter() {
     let conn = Connection::connect_to_env().expect("Wayland connection");
     let (globals, mut event_queue) = registry_queue_init(&conn).expect("registry init");
     let qh = event_queue.handle();
@@ -1181,30 +1181,143 @@ fn main() {
         }
     }
 
-    // Launch desktop session if authentication succeeded
+    // Print authentication success data and exit
     if let Some(st) = app.state {
         if st.login_success {
             let session = st.sessions[st.session_idx];
-            println!("[clear-display-manager] Authenticated successfully. Launching session: {}", session);
-            
-            // Session launch logic
-            match session {
-                "River WM" => {
-                    let script_path = "/home/lsgalante/Dropbox/Clear/clear-window-manager/start-river.sh";
-                    println!("[clear-display-manager] Executing session command: {}", script_path);
-                    let mut child = std::process::Command::new(script_path)
-                        .spawn()
-                        .expect("failed to execute start-river.sh");
-                    let _ = child.wait();
-                }
-                _ => {
-                    println!("[clear-display-manager] Executing default bash session");
-                    let mut child = std::process::Command::new("/bin/bash")
-                        .spawn()
-                        .expect("failed to execute bash");
-                    let _ = child.wait();
+            println!("AUTH_SUCCESS:{}:{}", st.username_box.text.trim(), session);
+            std::process::exit(0);
+        }
+    }
+    std::process::exit(1);
+}
+
+fn run_daemon() {
+    use users::os::unix::UserExt;
+    let uid = users::get_current_uid();
+    if uid != 0 {
+        eprintln!("[clear-display-manager] Error: Daemon mode must be run as root (UID 0). Effective UID: {}", uid);
+        eprintln!("[clear-display-manager] For local development/testing, run with: cargo run -- --greeter");
+        std::process::exit(1);
+    }
+
+    println!("[clear-display-manager] Starting display manager daemon...");
+
+    let runtime_dir = "/run/clear-display-manager";
+    if !std::path::Path::new(runtime_dir).exists() {
+        std::fs::create_dir_all(runtime_dir).expect("failed to create runtime dir");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(runtime_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("failed to set runtime dir permissions");
+    }
+
+    loop {
+        println!("[clear-display-manager] Spawning greeter session via cage...");
+
+        let exe_path = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/clear-display-manager"));
+
+        let mut child = std::process::Command::new("cage")
+            .arg(exe_path)
+            .arg("--greeter")
+            .env("XDG_RUNTIME_DIR", runtime_dir)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("failed to spawn cage compositor wrapper. Is cage installed?");
+
+        let stdout = child.stdout.take().expect("failed to open child stdout");
+        let reader = std::io::BufReader::new(stdout);
+        let mut auth_success = None;
+
+        use std::io::BufRead;
+        for line in reader.lines() {
+            if let Ok(line_str) = line {
+                println!("[greeter-stdout] {}", line_str);
+                if line_str.starts_with("AUTH_SUCCESS:") {
+                    let parts: Vec<&str> = line_str.split(':').collect();
+                    if parts.len() == 3 {
+                        let username = parts[1].to_string();
+                        let session = parts[2].to_string();
+                        auth_success = Some((username, session));
+                    }
                 }
             }
         }
+
+        let status = child.wait().expect("failed to wait on child process");
+        println!("[clear-display-manager] Greeter session exited with status: {}", status);
+
+        if let Some((username, session)) = auth_success {
+            println!("[clear-display-manager] Launching user session: '{}' for user: '{}'", session, username);
+            
+            let user = match users::get_user_by_name(&username) {
+                Some(u) => u,
+                None => {
+                    eprintln!("[clear-display-manager] Error: User '{}' not found in system.", username);
+                    continue;
+                }
+            };
+
+            let user_uid = user.uid();
+            let user_gid = user.primary_group_id();
+            let home_dir = user.home_dir().to_path_buf();
+            let shell = user.shell().to_str().unwrap_or("/bin/bash").to_string();
+
+            let user_runtime_dir = format!("/run/user/{}", user_uid);
+            
+            let (cmd_bin, cmd_args): (&str, Vec<String>) = match session.as_str() {
+                "River WM" => {
+                    ("/home/lsgalante/Dropbox/Clear/clear-window-manager/start-river.sh", vec![])
+                }
+                _ => {
+                    (shell.as_str(), vec![])
+                }
+            };
+
+            println!("[clear-display-manager] Spawning session: {} with UID={}, GID={}", cmd_bin, user_uid, user_gid);
+
+            use std::os::unix::process::CommandExt;
+            let mut session_cmd = std::process::Command::new(cmd_bin);
+            session_cmd
+                .args(&cmd_args)
+                .uid(user_uid)
+                .gid(user_gid)
+                .current_dir(&home_dir)
+                .env_clear()
+                .env("USER", &username)
+                .env("LOGNAME", &username)
+                .env("HOME", home_dir.to_str().unwrap())
+                .env("SHELL", &shell)
+                .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+                .env("XDG_RUNTIME_DIR", &user_runtime_dir);
+
+            let username_c = std::ffi::CString::new(username.clone()).unwrap();
+            unsafe {
+                session_cmd.pre_exec(move || {
+                    if libc::initgroups(username_c.as_ptr(), user_gid as libc::gid_t) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+
+            match session_cmd.spawn() {
+                Ok(mut child_proc) => {
+                    let _ = child_proc.wait();
+                }
+                Err(e) => {
+                    eprintln!("[clear-display-manager] Failed to launch session: {}", e);
+                }
+            }
+            println!("[clear-display-manager] User session ended.");
+        }
+    }
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && args[1] == "--greeter" {
+        run_greeter();
+    } else {
+        run_daemon();
     }
 }
