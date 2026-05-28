@@ -28,7 +28,7 @@ use wayland_client::{
     protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
     Connection, QueueHandle, Proxy,
 };
-use calloop::EventLoop;
+use calloop::{EventLoop, channel};
 use calloop_wayland_source::WaylandSource;
 
 use clear_ui::widget::{
@@ -217,6 +217,7 @@ struct State {
     sessions: Vec<&'static str>,
     session_idx: usize,
     login_success: bool,
+    is_authenticating: bool,
 }
 
 impl State {
@@ -352,6 +353,7 @@ impl State {
             sessions: vec!["River WM", "Bash Shell"],
             session_idx: 0,
             login_success: false,
+            is_authenticating: false,
         };
 
         state.apply_layout();
@@ -572,6 +574,49 @@ impl State {
     }
 }
 
+#[derive(Debug)]
+enum AuthEvent {
+    Success { username: String },
+    Failure(String),
+}
+
+fn authenticate_user(username: String, password: String, sender: channel::Sender<AuthEvent>) {
+    std::thread::spawn(move || {
+        let service = "clear-display-manager";
+        
+        let mut auth = match pam::Authenticator::with_password(service) {
+            Ok(a) => a,
+            Err(_) => {
+                match pam::Authenticator::with_password("login") {
+                    Ok(a) => a,
+                    Err(e) => {
+                        let _ = sender.send(AuthEvent::Failure(format!("PAM Init Error: {}", e)));
+                        return;
+                    }
+                }
+            }
+        };
+
+        auth.get_handler().set_credentials(username.clone(), password);
+
+        match auth.authenticate() {
+            Ok(_) => {
+                match auth.open_session() {
+                    Ok(_) => {
+                        let _ = sender.send(AuthEvent::Success { username });
+                    }
+                    Err(e) => {
+                        let _ = sender.send(AuthEvent::Failure(format!("PAM Session Error: {}", e)));
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = sender.send(AuthEvent::Failure(format!("Authentication failed: {}", e)));
+            }
+        }
+    });
+}
+
 // ── AppState and Client Callbacks ──
 struct AppState {
     registry_state: RegistryState,
@@ -594,6 +639,7 @@ struct AppState {
     ctrl_pressed: bool,
     shift_pressed: bool,
     pressed_key: Option<PressedKey>,
+    auth_sender: channel::Sender<AuthEvent>,
 }
 
 #[allow(dead_code)]
@@ -710,6 +756,9 @@ impl PointerHandler for AppState {
                         _ => continue,
                     };
                     if let Some(st) = &mut self.state {
+                        if st.is_authenticating {
+                            continue;
+                        }
                         let mut changed = false;
                         let cx = st.cursor_x;
                         let cy = st.cursor_y;
@@ -799,6 +848,9 @@ impl PointerHandler for AppState {
                         _ => continue,
                     };
                     if let Some(st) = &mut self.state {
+                        if st.is_authenticating {
+                            continue;
+                        }
                         let cx = st.cursor_x;
                         let cy = st.cursor_y;
                         let mut changed = false;
@@ -828,11 +880,11 @@ impl PointerHandler for AppState {
                                     st.status_lbl.text = "Password cannot be empty".to_string();
                                     st.status_lbl.is_error = true;
                                 } else {
-                                    // Accept login
-                                    st.status_lbl.text = format!("Logging in as {}...", username);
+                                    st.status_lbl.text = "Authenticating...".to_string();
                                     st.status_lbl.is_error = false;
-                                    st.login_success = true;
-                                    self.exit = true; // terminate Wayland GUI and start the session
+                                    st.is_authenticating = true;
+                                    st.login_btn.label = Some("Authenticating...".to_string());
+                                    authenticate_user(username, password, self.auth_sender.clone());
                                 }
                                 changed = true;
                             }
@@ -887,6 +939,9 @@ impl AppState {
 
         if state == ElementState::Pressed {
             if let Some(st) = &mut self.state {
+                if st.is_authenticating {
+                    return;
+                }
                 let mut changed = false;
 
                 // Handle Tab navigation between username and password boxes
@@ -1035,6 +1090,8 @@ fn main() {
     let seat_state = SeatState::new(&globals, &qh);
     let output_state = OutputState::new(&globals, &qh);
 
+    let (auth_sender, auth_receiver) = channel::channel::<AuthEvent>();
+
     let mut app = AppState {
         registry_state: RegistryState::new(&globals),
         compositor_state,
@@ -1053,6 +1110,7 @@ fn main() {
         ctrl_pressed: false,
         shift_pressed: false,
         pressed_key: None,
+        auth_sender,
     };
 
     event_queue.roundtrip(&mut app).unwrap();
@@ -1083,7 +1141,33 @@ fn main() {
 
     let mut event_loop = EventLoop::try_new().unwrap();
     let loop_handle = event_loop.handle();
-    WaylandSource::new(conn, event_queue).insert(loop_handle).unwrap();
+    WaylandSource::new(conn, event_queue).insert(loop_handle.clone()).unwrap();
+
+    loop_handle.insert_source(auth_receiver, |event, _metadata, app_state| {
+        match event {
+            channel::Event::Msg(msg) => {
+                if let Some(st) = &mut app_state.state {
+                    st.is_authenticating = false;
+                    st.login_btn.label = Some("Log In".to_string());
+                    match msg {
+                        AuthEvent::Success { username } => {
+                            st.status_lbl.text = format!("Welcome, {}!", username);
+                            st.status_lbl.is_error = false;
+                            st.login_success = true;
+                            app_state.exit = true;
+                        }
+                        AuthEvent::Failure(err_msg) => {
+                            st.status_lbl.text = err_msg;
+                            st.status_lbl.is_error = true;
+                        }
+                    }
+                    st.upload_vertices();
+                    app_state.redraw = true;
+                }
+            }
+            channel::Event::Closed => {}
+        }
+    }).unwrap();
 
     loop {
         event_loop.dispatch(std::time::Duration::from_millis(16), &mut app).unwrap();

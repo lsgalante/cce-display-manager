@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 clear-ui = { path = "../clear-ui" }
+pam = "0.7.0"
 smithay-client-toolkit = { version = "0.19.2", features = ["calloop"] }
 calloop = "0.13.0"
 calloop-wayland-source = "0.3.0"
