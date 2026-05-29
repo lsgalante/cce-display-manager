@@ -92,6 +92,75 @@ fn make_text_buffer(font_system: &mut FontSystem, text: &str, size: f32) -> Buff
 
 
 
+#[derive(Debug, Clone)]
+struct Session {
+    name: String,
+    exec: String,
+    is_wayland: bool,
+}
+
+fn sanitize_exec(exec: &str) -> (String, Vec<String>) {
+    let mut parts = Vec::new();
+    for part in exec.split_whitespace() {
+        if part.starts_with('%') {
+            continue; // ignore desktop entry field codes
+        }
+        parts.push(part.to_string());
+    }
+    if parts.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    let cmd = parts.remove(0);
+    (cmd, parts)
+}
+
+fn parse_desktop_file(path: &std::path::Path, is_wayland: bool) -> Result<Session, std::io::Error> {
+    let content = std::fs::read_to_string(path)?;
+    let mut name = None;
+    let mut exec = None;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with("Name=") {
+            name = Some(line["Name=".len()..].to_string());
+        } else if line.starts_with("Exec=") {
+            exec = Some(line["Exec=".len()..].to_string());
+        }
+    }
+    if let (Some(n), Some(e)) = (name, exec) {
+        Ok(Session { name: n, exec: e, is_wayland })
+    } else {
+        Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid desktop file"))
+    }
+}
+
+fn discover_sessions() -> Vec<Session> {
+    let mut sessions = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/usr/share/wayland-sessions") {
+        for entry in entries.flatten() {
+            if entry.path().extension().map_or(false, |ext| ext == "desktop") {
+                if let Ok(s) = parse_desktop_file(&entry.path(), true) {
+                    sessions.push(s);
+                }
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir("/usr/share/xsessions") {
+        for entry in entries.flatten() {
+            if entry.path().extension().map_or(false, |ext| ext == "desktop") {
+                if let Ok(s) = parse_desktop_file(&entry.path(), false) {
+                    sessions.push(s);
+                }
+            }
+        }
+    }
+    sessions.push(Session {
+        name: "Bash Shell".to_string(),
+        exec: "bash".to_string(),
+        is_wayland: true,
+    });
+    sessions
+}
+
 // ── Custom LoginCard Container Widget ──
 #[derive(Debug, Clone)]
 struct LoginCard {
@@ -178,6 +247,141 @@ impl Widget for StatusLabel {
     }
 }
 
+// ── Custom Session List Panel Widget ──
+#[derive(Debug, Clone)]
+struct SessionList {
+    x: f32, y: f32, w: f32, h: f32,
+    sessions: Vec<Session>,
+    selected_idx: usize,
+    hovered_idx: Option<usize>,
+}
+
+impl SessionList {
+    fn new(sessions: Vec<Session>) -> Self {
+        Self {
+            x: 0.0, y: 0.0, w: 0.0, h: 0.0,
+            sessions,
+            selected_idx: 0,
+            hovered_idx: None,
+        }
+    }
+
+    fn selected_session(&self) -> Option<&Session> {
+        self.sessions.get(self.selected_idx)
+    }
+}
+
+impl Widget for SessionList {
+    fn rect(&self) -> (f32, f32, f32, f32) { (self.x, self.y, self.w, self.h) }
+    fn set_rect(&mut self, x: f32, y: f32, w: f32, h: f32) { self.x = x; self.y = y; self.w = w; self.h = h; }
+    fn color(&self) -> [f32; 4] { [0.07, 0.07, 0.10, 0.70] } // Semi-transparent sleek dark card background
+
+    fn extra_quads(&self) -> Vec<(f32, f32, f32, f32, [f32; 4])> {
+        let mut quads = Vec::new();
+        
+        // 1. Panel borders (subtle blue accent)
+        let border_color = [0.20, 0.40, 0.65, 0.5];
+        quads.push((self.x, self.y, self.w, 1.5, border_color)); // top
+        quads.push((self.x, self.y + self.h - 1.5, self.w, 1.5, border_color)); // bottom
+        quads.push((self.x, self.y, 1.5, self.h, border_color)); // left
+        quads.push((self.x + self.w - 1.5, self.y, 1.5, self.h, border_color)); // right
+        
+        let item_w = self.w - 20.0;
+        
+        // 2. Selected item background
+        let selected_color = [0.20, 0.40, 0.65, 0.8]; // Solid blue highlight
+        let sel_y = self.y + 40.0 + self.selected_idx as f32 * 36.0;
+        quads.push((self.x + 10.0, sel_y, item_w, 32.0, selected_color));
+        
+        // 3. Hovered item background
+        if let Some(h_idx) = self.hovered_idx {
+            if h_idx != self.selected_idx && h_idx < self.sessions.len() {
+                let hover_color = [1.0, 1.0, 1.0, 0.06]; // Subtle white overlay
+                let h_y = self.y + 40.0 + h_idx as f32 * 36.0;
+                quads.push((self.x + 10.0, h_y, item_w, 32.0, hover_color));
+            }
+        }
+        
+        quads
+    }
+
+    fn text_labels(&self) -> Vec<TextLabel> {
+        let mut labels = Vec::new();
+        
+        // Header title
+        labels.push(TextLabel {
+            text: "SESSION MANAGER".to_string(),
+            x: self.x + 15.0,
+            y: self.y + 18.0,
+            font_size: 11.0,
+            color: [0x83, 0x83, 0x8a],
+        });
+        
+        // Session items
+        for (i, session) in self.sessions.iter().enumerate() {
+            let item_y = self.y + 40.0 + i as f32 * 36.0;
+            
+            let display_name = if session.name == "Bash Shell" {
+                "Bash Shell".to_string()
+            } else {
+                format!("{} ({})", session.name, if session.is_wayland { "Wayland" } else { "X11" })
+            };
+            
+            let color = if i == self.selected_idx {
+                [0xff, 0xff, 0xff]
+            } else {
+                [0xee, 0xee, 0xf5]
+            };
+            
+            labels.push(TextLabel {
+                text: display_name,
+                x: self.x + 20.0,
+                y: item_y + 10.0,
+                font_size: 12.0,
+                color,
+            });
+        }
+        
+        labels
+    }
+
+    fn cursor_moved(&mut self, px: f32, py: f32) -> bool {
+        let old_hovered = self.hovered_idx;
+        self.hovered_idx = None;
+        if self.hit_test(px, py) {
+            let item_w = self.w - 20.0;
+            for i in 0..self.sessions.len() {
+                let item_y = self.y + 40.0 + i as f32 * 36.0;
+                let item_x = self.x + 10.0;
+                if px >= item_x && px <= item_x + item_w && py >= item_y && py <= item_y + 32.0 {
+                    self.hovered_idx = Some(i);
+                    break;
+                }
+            }
+        }
+        self.hovered_idx != old_hovered
+    }
+
+    fn mouse_input(&mut self, button: MouseButton, state: ElementState, px: f32, py: f32) -> bool {
+        if button == MouseButton::Left && state == ElementState::Pressed {
+            if self.hit_test(px, py) {
+                let item_w = self.w - 20.0;
+                for i in 0..self.sessions.len() {
+                    let item_y = self.y + 40.0 + i as f32 * 36.0;
+                    let item_x = self.x + 10.0;
+                    if px >= item_x && px <= item_x + item_w && py >= item_y && py <= item_y + 32.0 {
+                        if self.selected_idx != i {
+                            self.selected_idx = i;
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+}
+
 // ── App State and Renderer ──
 struct State {
     surface: wgpu::Surface<'static>,
@@ -192,9 +396,9 @@ struct State {
     card: LoginCard,
     username_box: TextBox,
     password_box: TextBox,
-    session_btn: Button,
     login_btn: Button,
     status_lbl: StatusLabel,
+    session_list: SessionList,
 
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -214,9 +418,7 @@ struct State {
     scale: f64,
     compositor_scale: f64,
 
-    // Sessions and State tracking
-    sessions: Vec<&'static str>,
-    session_idx: usize,
+    // State tracking
     login_success: bool,
     is_authenticating: bool,
 }
@@ -227,6 +429,7 @@ impl State {
         pw: u32, ph: u32,
         scale: f64,
         compositor_scale: f64,
+        sessions: Vec<Session>,
     ) -> Self {
         let lw = pw as f32 / scale as f32;
         let lh = ph as f32 / scale as f32;
@@ -317,9 +520,9 @@ impl State {
         let card = LoginCard::new();
         let username_box = TextBox::new(current_user).with_label("USERNAME");
         let password_box = TextBox::new(String::new()).with_password(true).with_label("PASSWORD");
-        let session_btn = Button::new(0.0, 0.0, 130.0, 32.0).with_label("Session: River WM");
-        let login_btn = Button::new(0.0, 0.0, 130.0, 32.0).with_label("Log In");
+        let login_btn = Button::new(0.0, 0.0, 300.0, 36.0).with_label("Log In");
         let status_lbl = StatusLabel::new("Enter password to start".to_string());
+        let session_list = SessionList::new(sessions);
 
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Vertex Buffer"),
@@ -340,9 +543,9 @@ impl State {
             card,
             username_box,
             password_box,
-            session_btn,
             login_btn,
             status_lbl,
+            session_list,
             font_system,
             swash_cache,
             text_atlas,
@@ -357,8 +560,6 @@ impl State {
             physical_height: ph,
             scale,
             compositor_scale,
-            sessions: vec!["River WM", "Bash Shell"],
-            session_idx: 0,
             login_success: false,
             is_authenticating: false,
         };
@@ -374,9 +575,9 @@ impl State {
             &self.card,
             &self.username_box,
             &self.password_box,
-            &self.session_btn,
             &self.login_btn,
             &self.status_lbl,
+            &self.session_list,
         ]
     }
 
@@ -386,9 +587,9 @@ impl State {
             &mut self.card,
             &mut self.username_box,
             &mut self.password_box,
-            &mut self.session_btn,
             &mut self.login_btn,
             &mut self.status_lbl,
+            &mut self.session_list,
         ]
     }
 
@@ -415,14 +616,16 @@ impl State {
         // Password password box
         self.password_box.set_rect(content_x, card_y + 145.0, 300.0, 36.0);
 
-        // Session toggler button
-        self.session_btn.set_rect(content_x, card_y + 205.0, 140.0, 32.0);
-
-        // Login button
-        self.login_btn.set_rect(content_x + 160.0, card_y + 205.0, 140.0, 32.0);
+        // Login button (full-width of the contents)
+        self.login_btn.set_rect(content_x, card_y + 205.0, 300.0, 36.0);
 
         // Status message
         self.status_lbl.set_rect(content_x, card_y + 252.0, 300.0, 20.0);
+
+        // Session list on top left
+        let list_w = 260.0;
+        let list_h = 40.0 + self.session_list.sessions.len() as f32 * 36.0;
+        self.session_list.set_rect(30.0, 30.0, list_w, list_h);
     }
 
     fn collect_vertices(&self) -> Vec<Vertex> {
@@ -782,7 +985,7 @@ impl PointerHandler for AppState {
                             // Unfocus other elements if a click is made
                             let hit_any = st.status_lbl.hit_test(cx, cy)
                                 || st.login_btn.hit_test(cx, cy)
-                                || st.session_btn.hit_test(cx, cy)
+                                || st.session_list.hit_test(cx, cy)
                                 || st.password_box.hit_test(cx, cy)
                                 || st.username_box.hit_test(cx, cy)
                                 || st.card.hit_test(cx, cy)
@@ -792,7 +995,7 @@ impl PointerHandler for AppState {
                                 st.card.unfocus();
                                 st.username_box.unfocus();
                                 st.password_box.unfocus();
-                                st.session_btn.unfocus();
+                                st.session_list.unfocus();
                                 st.login_btn.unfocus();
                                 st.status_lbl.unfocus();
                             }
@@ -813,12 +1016,12 @@ impl PointerHandler for AppState {
                             if btn == MouseButton::Left {
                                 st.login_btn.focus();
                             }
-                        } else if st.session_btn.hit_test(cx, cy) {
-                            if st.session_btn.mouse_input(btn, ElementState::Pressed, cx, cy) {
+                        } else if st.session_list.hit_test(cx, cy) {
+                            if st.session_list.mouse_input(btn, ElementState::Pressed, cx, cy) {
                                 changed = true;
                             }
                             if btn == MouseButton::Left {
-                                st.session_btn.focus();
+                                st.session_list.focus();
                             }
                         } else if st.password_box.hit_test(cx, cy) {
                             if st.password_box.mouse_input(btn, ElementState::Pressed, cx, cy) {
@@ -876,13 +1079,6 @@ impl PointerHandler for AppState {
                             }
                         }
                         if btn == MouseButton::Left {
-                            // Handle session select cycle click
-                            if st.session_btn.take_click() {
-                                st.session_idx = (st.session_idx + 1) % st.sessions.len();
-                                let session_name = st.sessions[st.session_idx];
-                                st.session_btn.label = Some(format!("Session: {}", session_name));
-                                changed = true;
-                            }
                             // Handle login click
                             if st.login_btn.take_click() {
                                 // Extract login username and password
@@ -1171,7 +1367,8 @@ fn run_greeter() {
         surface_ptr: surface.id().as_ptr() as *mut std::ffi::c_void,
     }));
 
-    let state = pollster::block_on(State::new(wayland_handle, pw, ph, layout_scale, compositor_scale));
+    let sessions = discover_sessions();
+    let state = pollster::block_on(State::new(wayland_handle, pw, ph, layout_scale, compositor_scale, sessions));
 
     app.window = Some(window);
     app.surface = Some(surface);
@@ -1222,9 +1419,10 @@ fn run_greeter() {
     // Print authentication success data and exit
     if let Some(st) = app.state {
         if st.login_success {
-            let session = st.sessions[st.session_idx];
-            println!("AUTH_SUCCESS:{}:{}", st.username_box.text.trim(), session);
-            std::process::exit(0);
+            if let Some(session) = st.session_list.selected_session() {
+                println!("AUTH_SUCCESS:{}:{}:{}", st.username_box.text.trim(), session.exec, session.is_wayland);
+                std::process::exit(0);
+            }
         }
     }
     std::process::exit(1);
@@ -1272,12 +1470,13 @@ fn run_daemon() {
         for line in reader.lines() {
             if let Ok(line_str) = line {
                 println!("[greeter-stdout] {}", line_str);
-                if line_str.starts_with("AUTH_SUCCESS:") {
-                    let parts: Vec<&str> = line_str.split(':').collect();
-                    if parts.len() == 3 {
+                if line_str.starts_with("AUTH_SUCCESS|") {
+                    let parts: Vec<&str> = line_str.split('|').collect();
+                    if parts.len() == 4 {
                         let username = parts[1].to_string();
-                        let session = parts[2].to_string();
-                        auth_success = Some((username, session));
+                        let exec = parts[2].to_string();
+                        let is_wayland = parts[3].parse::<bool>().unwrap_or(true);
+                        auth_success = Some((username, exec, is_wayland));
                     }
                 }
             }
@@ -1286,8 +1485,8 @@ fn run_daemon() {
         let status = child.wait().expect("failed to wait on child process");
         println!("[clear-display-manager] Greeter session exited with status: {}", status);
 
-        if let Some((username, session)) = auth_success {
-            println!("[clear-display-manager] Launching user session: '{}' for user: '{}'", session, username);
+        if let Some((username, exec, is_wayland)) = auth_success {
+            println!("[clear-display-manager] Launching user session Exec: '{}' (Wayland: {}) for user: '{}'", exec, is_wayland, username);
             
             let user = match users::get_user_by_name(&username) {
                 Some(u) => u,
@@ -1304,19 +1503,27 @@ fn run_daemon() {
 
             let user_runtime_dir = format!("/run/user/{}", user_uid);
             
-            let (cmd_bin, cmd_args): (&str, Vec<String>) = match session.as_str() {
-                "River WM" => {
-                    ("/home/lsgalante/Dropbox/Clear/clear-window-manager/start-river.sh", vec![])
-                }
-                _ => {
-                    (shell.as_str(), vec![])
-                }
+            let (cmd_bin, cmd_args): (String, Vec<String>) = if is_wayland {
+                sanitize_exec(&exec)
+            } else {
+                let (client_bin, client_args) = sanitize_exec(&exec);
+                let xinit_bin = "/usr/sbin/xinit".to_string();
+                let mut args = vec![client_bin];
+                args.extend(client_args);
+                args.push("--".to_string());
+                args.push("-keeptty".to_string());
+                (xinit_bin, args)
             };
 
-            println!("[clear-display-manager] Spawning session: {} with UID={}, GID={}", cmd_bin, user_uid, user_gid);
+            if cmd_bin.is_empty() {
+                eprintln!("[clear-display-manager] Error: Resolved execution command is empty.");
+                continue;
+            }
+
+            println!("[clear-display-manager] Spawning session: {} with args {:?} for UID={}, GID={}", cmd_bin, cmd_args, user_uid, user_gid);
 
             use std::os::unix::process::CommandExt;
-            let mut session_cmd = std::process::Command::new(cmd_bin);
+            let mut session_cmd = std::process::Command::new(&cmd_bin);
             session_cmd
                 .args(&cmd_args)
                 .uid(user_uid)
@@ -1328,7 +1535,10 @@ fn run_daemon() {
                 .env("HOME", home_dir.to_str().unwrap())
                 .env("SHELL", &shell)
                 .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
-                .env("XDG_RUNTIME_DIR", &user_runtime_dir);
+                .env("XDG_RUNTIME_DIR", &user_runtime_dir)
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit());
 
             let username_c = std::ffi::CString::new(username.clone()).unwrap();
             unsafe {
