@@ -1438,6 +1438,21 @@ fn run_daemon() {
         std::process::exit(1);
     }
 
+    // Redirect stdout and stderr of the daemon to a log file
+    if let Ok(log_file) = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open("/tmp/clear-display-manager-daemon.log")
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = log_file.as_raw_fd();
+        unsafe {
+            libc::dup2(fd, 1);
+            libc::dup2(fd, 2);
+        }
+    }
+
     println!("[clear-display-manager] Starting display manager daemon...");
 
     let runtime_dir = "/run/clear-display-manager";
@@ -1571,16 +1586,10 @@ fn run_daemon() {
                 .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
                 .env("XDG_RUNTIME_DIR", &user_runtime_dir)
                 .env("XDG_SESSION_TYPE", if is_wayland { "wayland" } else { "x11" })
-                .env("XDG_SESSION_CLASS", "user");
-            let log_file = std::fs::File::create("/tmp/clear-display-manager-session.log");
-            if let Ok(ref f) = log_file {
-                session_cmd.stdout(std::process::Stdio::from(f.try_clone().unwrap()));
-                session_cmd.stderr(std::process::Stdio::from(f.try_clone().unwrap()));
-            } else {
-                session_cmd.stdout(std::process::Stdio::inherit());
-                session_cmd.stderr(std::process::Stdio::inherit());
-            }
-            session_cmd.stdin(std::process::Stdio::null());
+                .env("XDG_SESSION_CLASS", "user")
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit());
 
             // Filter out sudo env vars so they don't leak into the user session
             for key in &["SUDO_USER", "SUDO_UID", "SUDO_GID", "SUDO_COMMAND"] {
