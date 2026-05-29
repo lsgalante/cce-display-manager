@@ -1576,8 +1576,6 @@ fn run_daemon() {
             let mut session_cmd = std::process::Command::new(&cmd_bin);
             session_cmd
                 .args(&cmd_args)
-                .uid(user_uid)
-                .gid(user_gid)
                 .current_dir(&home_dir)
                 .env("USER", &username)
                 .env("LOGNAME", &username)
@@ -1600,6 +1598,12 @@ fn run_daemon() {
             unsafe {
                 session_cmd.pre_exec(move || {
                     if libc::initgroups(username_c.as_ptr(), user_gid as libc::gid_t) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if libc::setgid(user_gid as libc::gid_t) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if libc::setuid(user_uid as libc::uid_t) != 0 {
                         return Err(std::io::Error::last_os_error());
                     }
                     Ok(())
