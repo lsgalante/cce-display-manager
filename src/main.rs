@@ -1489,6 +1489,14 @@ impl PamSession {
             return Err(rc);
         }
 
+        unsafe {
+            let pass_c = std::ffi::CString::new(password).unwrap();
+            let _ = pam_sys::raw::pam_set_item(handle, pam_sys::PamItemType::AUTHTOK as libc::c_int, pass_c.as_ptr() as *const libc::c_void);
+            
+            let tty_c = std::ffi::CString::new("tty1").unwrap();
+            let _ = pam_sys::raw::pam_set_item(handle, pam_sys::PamItemType::TTY as libc::c_int, tty_c.as_ptr() as *const libc::c_void);
+        }
+
         Ok(Self { handle, _data: data, has_open_session: false })
     }
 
@@ -1681,6 +1689,7 @@ fn run_daemon() {
             }
 
             let pam_env = auth.get_env();
+            println!("[clear-display-manager] PAM Environment variables: {:?}", pam_env);
 
             let user = match users::get_user_by_name(&username) {
                 Some(u) => u,
