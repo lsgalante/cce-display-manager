@@ -1429,6 +1429,144 @@ fn run_greeter() {
     std::process::exit(1);
 }
 
+struct PamSessionData {
+    username: String,
+    password: String,
+}
+
+extern "C" fn pam_conversation_fn(
+    num_msg: libc::c_int,
+    msg: *mut *mut pam_sys::PamMessage,
+    out_resp: *mut *mut pam_sys::PamResponse,
+    appdata_ptr: *mut libc::c_void,
+) -> libc::c_int {
+    let data = unsafe { &*(appdata_ptr as *const PamSessionData) };
+    let resp_size = std::mem::size_of::<pam_sys::PamResponse>();
+    let resp = unsafe { libc::calloc(num_msg as usize, resp_size) as *mut pam_sys::PamResponse };
+    if resp.is_null() {
+        return pam_sys::PamReturnCode::BUF_ERR as libc::c_int;
+    }
+
+    for i in 0..num_msg as isize {
+        unsafe {
+            let m = &**msg.offset(i);
+            let r = &mut *resp.offset(i);
+            if m.msg_style == pam_sys::PamMessageStyle::PROMPT_ECHO_ON as libc::c_int {
+                let user_c = std::ffi::CString::new(data.username.clone()).unwrap();
+                r.resp = libc::strdup(user_c.as_ptr());
+            } else if m.msg_style == pam_sys::PamMessageStyle::PROMPT_ECHO_OFF as libc::c_int {
+                let pass_c = std::ffi::CString::new(data.password.clone()).unwrap();
+                r.resp = libc::strdup(pass_c.as_ptr());
+            }
+        }
+    }
+
+    unsafe { *out_resp = resp };
+    pam_sys::PamReturnCode::SUCCESS as libc::c_int
+}
+
+struct PamSession {
+    handle: *mut pam_sys::PamHandle,
+    _data: Box<PamSessionData>,
+    has_open_session: bool,
+}
+
+impl PamSession {
+    fn new(service: &str, username: &str, password: &str) -> Result<Self, pam_sys::PamReturnCode> {
+        let mut handle: *mut pam_sys::PamHandle = std::ptr::null_mut();
+        let data = Box::new(PamSessionData {
+            username: username.to_string(),
+            password: password.to_string(),
+        });
+        
+        let conv = pam_sys::PamConversation {
+            conv: Some(pam_conversation_fn),
+            data_ptr: &*data as *const PamSessionData as *mut libc::c_void,
+        };
+
+        let rc = pam_sys::start(service, Some(username), &conv, &mut handle);
+        if rc != pam_sys::PamReturnCode::SUCCESS {
+            return Err(rc);
+        }
+
+        Ok(Self { handle, _data: data, has_open_session: false })
+    }
+
+    fn authenticate(&mut self) -> Result<(), pam_sys::PamReturnCode> {
+        unsafe {
+            let rc = pam_sys::authenticate(&mut *self.handle, pam_sys::PamFlag::NONE);
+            if rc != pam_sys::PamReturnCode::SUCCESS {
+                return Err(rc);
+            }
+
+            let rc = pam_sys::acct_mgmt(&mut *self.handle, pam_sys::PamFlag::NONE);
+            if rc != pam_sys::PamReturnCode::SUCCESS {
+                return Err(rc);
+            }
+        }
+        Ok(())
+    }
+
+    fn open_session(&mut self) -> Result<(), pam_sys::PamReturnCode> {
+        unsafe {
+            let rc = pam_sys::setcred(&mut *self.handle, pam_sys::PamFlag::ESTABLISH_CRED);
+            if rc != pam_sys::PamReturnCode::SUCCESS {
+                return Err(rc);
+            }
+
+            let rc = pam_sys::open_session(&mut *self.handle, pam_sys::PamFlag::NONE);
+            if rc != pam_sys::PamReturnCode::SUCCESS {
+                return Err(rc);
+            }
+
+            // Follow openSSH and call pam_setcred before and after open_session
+            let rc = pam_sys::setcred(&mut *self.handle, pam_sys::PamFlag::REINITIALIZE_CRED);
+            if rc != pam_sys::PamReturnCode::SUCCESS {
+                return Err(rc);
+            }
+        }
+        self.has_open_session = true;
+        Ok(())
+    }
+
+    fn get_env(&mut self) -> Vec<(String, String)> {
+        let mut vec = Vec::new();
+        unsafe {
+            let env_list = pam_sys::getenvlist(&mut *self.handle);
+            if !env_list.is_null() {
+                let mut idx = 0;
+                loop {
+                    let env_ptr = *env_list.offset(idx);
+                    if !env_ptr.is_null() {
+                        idx += 1;
+                        let env_str = std::ffi::CStr::from_ptr(env_ptr).to_string_lossy();
+                        let split: Vec<_> = env_str.splitn(2, '=').collect();
+                        if split.len() == 2 {
+                            vec.push((split[0].to_string(), split[1].to_string()));
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                pam_sys::raw::pam_misc_drop_env(env_list as *mut *mut libc::c_char);
+            }
+        }
+        vec
+    }
+}
+
+impl Drop for PamSession {
+    fn drop(&mut self) {
+        unsafe {
+            if self.has_open_session {
+                pam_sys::close_session(&mut *self.handle, pam_sys::PamFlag::NONE);
+            }
+            let rc = pam_sys::setcred(&mut *self.handle, pam_sys::PamFlag::DELETE_CRED);
+            pam_sys::end(&mut *self.handle, rc);
+        }
+    }
+}
+
 fn run_daemon() {
     use users::os::unix::UserExt;
     let uid = users::get_current_uid();
@@ -1474,6 +1612,7 @@ fn run_daemon() {
             .arg(exe_path)
             .arg("--greeter")
             .env("XDG_RUNTIME_DIR", runtime_dir)
+            .env("LIBSEAT_BACKEND", "seatd")
             .stdout(std::process::Stdio::piped())
             .spawn()
             .expect("failed to spawn cage compositor wrapper. Is cage installed?");
@@ -1509,34 +1648,39 @@ fn run_daemon() {
             std::process::exit(0);
         }
 
+        if auth_success.is_none() {
+            // Sleep briefly to prevent high CPU usage if the greeter keeps crashing on startup
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+        }
+
         if let Some((username, exec, is_wayland, password)) = auth_success {
             println!("[clear-display-manager] Launching user session Exec: '{}' (Wayland: {}) for user: '{}'", exec, is_wayland, username);
             
             let service = "clear-display-manager";
-            let mut auth = match pam::Authenticator::with_password(service) {
+            let mut auth = match PamSession::new(service, &username, &password) {
                 Ok(a) => a,
                 Err(_) => {
-                    match pam::Authenticator::with_password("login") {
+                    match PamSession::new("login", &username, &password) {
                         Ok(a) => a,
                         Err(e) => {
-                            eprintln!("[clear-display-manager] PAM Init Error in daemon: {}", e);
+                            eprintln!("[clear-display-manager] PAM Init Error in daemon: {:?}", e);
                             continue;
                         }
                     }
                 }
             };
 
-            auth.get_handler().set_credentials(username.clone(), password);
-
             if let Err(e) = auth.authenticate() {
-                eprintln!("[clear-display-manager] PAM Authentication failed in daemon: {}", e);
+                eprintln!("[clear-display-manager] PAM Authentication failed in daemon: {:?}", e);
                 continue;
             }
 
             if let Err(e) = auth.open_session() {
-                eprintln!("[clear-display-manager] PAM Session failed in daemon: {}", e);
+                eprintln!("[clear-display-manager] PAM Session failed in daemon: {:?}", e);
                 continue;
             }
+
+            let pam_env = auth.get_env();
 
             let user = match users::get_user_by_name(&username) {
                 Some(u) => u,
@@ -1576,6 +1720,7 @@ fn run_daemon() {
             let mut session_cmd = std::process::Command::new(&cmd_bin);
             session_cmd
                 .args(&cmd_args)
+                .envs(pam_env)
                 .current_dir(&home_dir)
                 .env("USER", &username)
                 .env("LOGNAME", &username)
