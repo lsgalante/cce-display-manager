@@ -212,6 +212,7 @@ struct State {
     physical_width: u32,
     physical_height: u32,
     scale: f64,
+    compositor_scale: f64,
 
     // Sessions and State tracking
     sessions: Vec<&'static str>,
@@ -221,7 +222,12 @@ struct State {
 }
 
 impl State {
-    async fn new(wayland_handle: &'static clear_ui::wayland::WaylandSurfaceHandle, pw: u32, ph: u32, scale: f64) -> Self {
+    async fn new(
+        wayland_handle: &'static clear_ui::wayland::WaylandSurfaceHandle,
+        pw: u32, ph: u32,
+        scale: f64,
+        compositor_scale: f64,
+    ) -> Self {
         let lw = pw as f32 / scale as f32;
         let lh = ph as f32 / scale as f32;
 
@@ -350,6 +356,7 @@ impl State {
             physical_width: pw,
             physical_height: ph,
             scale,
+            compositor_scale,
             sessions: vec!["River WM", "Bash Shell"],
             session_idx: 0,
             login_success: false,
@@ -659,12 +666,19 @@ impl CompositorHandler for AppState {
         scale_factor: i32,
     ) {
         let sys_config = load_system_config();
-        let scale = sys_config.scale.unwrap_or(scale_factor as f64);
-        surface.set_buffer_scale(scale as i32);
+        let compositor_scale = scale_factor as f64;
+        let layout_scale = sys_config.scale.unwrap_or(compositor_scale);
+        
+        surface.set_buffer_scale(scale_factor);
         if let Some(state) = &mut self.state {
-            state.scale = scale;
-            let pw = (state.width as f64 * state.scale) as u32;
-            let ph = (state.height as f64 * state.scale) as u32;
+            let logical_w = state.physical_width as f64 / state.compositor_scale;
+            let logical_h = state.physical_height as f64 / state.compositor_scale;
+            
+            state.compositor_scale = compositor_scale;
+            state.scale = layout_scale;
+            
+            let pw = (logical_w * compositor_scale) as u32;
+            let ph = (logical_h * compositor_scale) as u32;
             state.resize(pw, ph);
         }
         self.redraw = true;
@@ -1053,8 +1067,8 @@ impl WindowHandler for AppState {
         let width = w.map(|v| v.get()).unwrap_or(1024);
         let height = h.map(|v| v.get()).unwrap_or(768);
         if let Some(state) = &mut self.state {
-            let pw = (width as f64 * state.scale) as u32;
-            let ph = (height as f64 * state.scale) as u32;
+            let pw = (width as f64 * state.compositor_scale) as u32;
+            let ph = (height as f64 * state.compositor_scale) as u32;
             state.resize(pw, ph);
         }
         self.redraw = true;
@@ -1136,17 +1150,15 @@ fn run_greeter() {
 
     let sys_config = load_system_config();
     eprintln!("[clear-display-manager] Loaded system config: {:?}", sys_config);
-    let scale = sys_config.scale.unwrap_or_else(|| {
-        let detected = clear_ui::wayland::detect_scale_factor(&app.output_state);
-        eprintln!("[clear-display-manager] Detected scale factor from Wayland: {}", detected);
-        detected
-    });
-    eprintln!("[clear-display-manager] Final resolved scale factor: {}", scale);
+    let compositor_scale = clear_ui::wayland::detect_scale_factor(&app.output_state);
+    eprintln!("[clear-display-manager] Detected compositor scale factor from Wayland: {}", compositor_scale);
+    let layout_scale = sys_config.scale.unwrap_or(compositor_scale);
+    eprintln!("[clear-display-manager] Final resolved layout scale factor: {}", layout_scale);
     let surface = app.compositor_state.create_surface(&qh);
-    surface.set_buffer_scale(scale as i32);
+    surface.set_buffer_scale(compositor_scale as i32);
 
-    let pw = (1024.0 * scale) as u32;
-    let ph = (768.0 * scale) as u32;
+    let pw = (1024.0 * compositor_scale) as u32;
+    let ph = (768.0 * compositor_scale) as u32;
 
     let window = app.xdg_shell_state.create_window(surface.clone(), WindowDecorations::None, &qh);
     window.set_title("Clear Display Manager");
@@ -1159,7 +1171,7 @@ fn run_greeter() {
         surface_ptr: surface.id().as_ptr() as *mut std::ffi::c_void,
     }));
 
-    let state = pollster::block_on(State::new(wayland_handle, pw, ph, scale));
+    let state = pollster::block_on(State::new(wayland_handle, pw, ph, layout_scale, compositor_scale));
 
     app.window = Some(window);
     app.surface = Some(surface);
