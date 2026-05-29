@@ -14,7 +14,7 @@ TTYReset=yes
 TTYVHangup=yes
 TTYVTDisallocate=yes
 UtmpIdentifier=tty7
-UtmpType=user_process
+UtmpMode=user
 
 [Install]
 WantedBy=graphical.target
