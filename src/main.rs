@@ -1116,6 +1116,13 @@ impl PointerHandler for AppState {
 impl AppState {
     fn handle_key(&mut self, event: smithay_client_toolkit::seat::keyboard::KeyEvent, state: ElementState) {
         let keysym = event.keysym;
+
+        // Check for Ctrl+C to abort/exit back to TTY
+        if self.ctrl_pressed && (keysym == xkeysym::Keysym::c || keysym == xkeysym::Keysym::C) {
+            eprintln!("[clear-display-manager] Ctrl+C pressed. Aborting greeter.");
+            std::process::exit(130);
+        }
+
         let logical_key = match keysym {
             xkeysym::Keysym::BackSpace => Key::Named(NamedKey::Backspace),
             xkeysym::Keysym::Tab => Key::Named(NamedKey::Tab),
@@ -1484,6 +1491,11 @@ fn run_daemon() {
 
         let status = child.wait().expect("failed to wait on child process");
         println!("[clear-display-manager] Greeter session exited with status: {}", status);
+
+        if status.code() == Some(130) {
+            println!("[clear-display-manager] Abort requested via Ctrl+C. Exiting display manager daemon.");
+            std::process::exit(0);
+        }
 
         if let Some((username, exec, is_wayland)) = auth_success {
             println!("[clear-display-manager] Launching user session Exec: '{}' (Wayland: {}) for user: '{}'", exec, is_wayland, username);
