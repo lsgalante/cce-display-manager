@@ -658,9 +658,11 @@ impl CompositorHandler for AppState {
         surface: &wl_surface::WlSurface,
         scale_factor: i32,
     ) {
-        surface.set_buffer_scale(scale_factor);
+        let sys_config = load_system_config();
+        let scale = sys_config.scale.unwrap_or(scale_factor as f64);
+        surface.set_buffer_scale(scale as i32);
         if let Some(state) = &mut self.state {
-            state.scale = scale_factor as f64;
+            state.scale = scale;
             let pw = (state.width as f64 * state.scale) as u32;
             let ph = (state.height as f64 * state.scale) as u32;
             state.resize(pw, ph);
@@ -1133,9 +1135,13 @@ fn run_greeter() {
     event_queue.roundtrip(&mut app).unwrap();
 
     let sys_config = load_system_config();
+    eprintln!("[clear-display-manager] Loaded system config: {:?}", sys_config);
     let scale = sys_config.scale.unwrap_or_else(|| {
-        clear_ui::wayland::detect_scale_factor(&app.output_state)
+        let detected = clear_ui::wayland::detect_scale_factor(&app.output_state);
+        eprintln!("[clear-display-manager] Detected scale factor from Wayland: {}", detected);
+        detected
     });
+    eprintln!("[clear-display-manager] Final resolved scale factor: {}", scale);
     let surface = app.compositor_state.create_surface(&qh);
     surface.set_buffer_scale(scale as i32);
 
