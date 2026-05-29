@@ -513,8 +513,20 @@ impl State {
 
         let info_buffer = make_text_buffer(&mut font_system, "Press Tab to switch fields • Session selector: Click current session label", 11.0);
 
-        // Prepopulate username if environment has USER
-        let current_user = std::env::var("USER").unwrap_or_else(|_| "clear".to_string());
+        // Prepopulate username from last_user file if it exists
+        let last_user_path = "/var/lib/clear-display-manager/last_user";
+        let current_user = if std::path::Path::new(last_user_path).exists() {
+            std::fs::read_to_string(last_user_path)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| String::new())
+        } else {
+            let env_user = std::env::var("USER").unwrap_or_else(|_| String::new());
+            if env_user == "root" || env_user == "clear-display-manager" {
+                String::new()
+            } else {
+                env_user
+            }
+        };
 
         let bg = ContentBg::new();
         let card = LoginCard::new();
@@ -565,6 +577,11 @@ impl State {
         };
 
         state.apply_layout();
+        if state.username_box.text.is_empty() {
+            state.username_box.focus();
+        } else {
+            state.password_box.focus();
+        }
         state.upload_vertices();
         state
     }
@@ -1621,6 +1638,8 @@ fn run_daemon() {
             .arg("--greeter")
             .env("XDG_RUNTIME_DIR", runtime_dir)
             .env("LIBSEAT_BACKEND", "seatd")
+            .env("WLR_DRM_NO_MODIFIERS", "1")
+            .env("WLR_DRM_DEVICES", "/dev/dri/card1:/dev/dri/card0")
             .stdout(std::process::Stdio::piped())
             .spawn()
             .expect("failed to spawn cage compositor wrapper. Is cage installed?");
@@ -1662,6 +1681,14 @@ fn run_daemon() {
         }
 
         if let Some((username, exec, is_wayland, password)) = auth_success {
+            // Write last logged-in user to persistent file
+            let var_lib = "/var/lib/clear-display-manager";
+            if let Err(e) = std::fs::create_dir_all(var_lib) {
+                eprintln!("[clear-display-manager] Failed to create var lib dir: {:?}", e);
+            } else if let Err(e) = std::fs::write(format!("{}/last_user", var_lib), &username) {
+                eprintln!("[clear-display-manager] Failed to write last_user file: {:?}", e);
+            }
+
             println!("[clear-display-manager] Launching user session Exec: '{}' (Wayland: {}) for user: '{}'", exec, is_wayland, username);
             
             let service = "clear-display-manager";
