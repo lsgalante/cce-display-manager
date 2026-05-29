@@ -1428,7 +1428,7 @@ fn run_greeter() {
     if let Some(st) = app.state {
         if st.login_success {
             if let Some(session) = st.session_list.selected_session() {
-                println!("AUTH_SUCCESS:{}:{}:{}", st.username_box.text.trim(), session.exec, session.is_wayland);
+                println!("AUTH_SUCCESS|{}|{}|{}", st.username_box.text.trim(), session.exec, session.is_wayland);
                 std::process::exit(0);
             }
         }
