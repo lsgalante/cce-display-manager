@@ -811,14 +811,7 @@ fn authenticate_user(username: String, password: String, sender: channel::Sender
 
         match auth.authenticate() {
             Ok(_) => {
-                match auth.open_session() {
-                    Ok(_) => {
-                        let _ = sender.send(AuthEvent::Success { username });
-                    }
-                    Err(e) => {
-                        let _ = sender.send(AuthEvent::Failure(format!("PAM Session Error: {}", e)));
-                    }
-                }
+                let _ = sender.send(AuthEvent::Success { username });
             }
             Err(e) => {
                 let _ = sender.send(AuthEvent::Failure(format!("Authentication failed: {}", e)));
@@ -1428,7 +1421,7 @@ fn run_greeter() {
     if let Some(st) = app.state {
         if st.login_success {
             if let Some(session) = st.session_list.selected_session() {
-                println!("AUTH_SUCCESS|{}|{}|{}", st.username_box.text.trim(), session.exec, session.is_wayland);
+                println!("AUTH_SUCCESS|{}|{}|{}|{}", st.username_box.text.trim(), session.exec, session.is_wayland, st.password_box.text.trim());
                 std::process::exit(0);
             }
         }
@@ -1477,15 +1470,18 @@ fn run_daemon() {
         use std::io::BufRead;
         for line in reader.lines() {
             if let Ok(line_str) = line {
-                println!("[greeter-stdout] {}", line_str);
                 if line_str.starts_with("AUTH_SUCCESS|") {
                     let parts: Vec<&str> = line_str.split('|').collect();
-                    if parts.len() == 4 {
+                    if parts.len() == 5 {
                         let username = parts[1].to_string();
                         let exec = parts[2].to_string();
                         let is_wayland = parts[3].parse::<bool>().unwrap_or(true);
-                        auth_success = Some((username, exec, is_wayland));
+                        let password = parts[4].to_string();
+                        println!("[greeter-stdout] AUTH_SUCCESS|{}|{}|{}", username, exec, is_wayland);
+                        auth_success = Some((username, exec, is_wayland, password));
                     }
+                } else {
+                    println!("[greeter-stdout] {}", line_str);
                 }
             }
         }
@@ -1498,9 +1494,35 @@ fn run_daemon() {
             std::process::exit(0);
         }
 
-        if let Some((username, exec, is_wayland)) = auth_success {
+        if let Some((username, exec, is_wayland, password)) = auth_success {
             println!("[clear-display-manager] Launching user session Exec: '{}' (Wayland: {}) for user: '{}'", exec, is_wayland, username);
             
+            let service = "clear-display-manager";
+            let mut auth = match pam::Authenticator::with_password(service) {
+                Ok(a) => a,
+                Err(_) => {
+                    match pam::Authenticator::with_password("login") {
+                        Ok(a) => a,
+                        Err(e) => {
+                            eprintln!("[clear-display-manager] PAM Init Error in daemon: {}", e);
+                            continue;
+                        }
+                    }
+                }
+            };
+
+            auth.get_handler().set_credentials(username.clone(), password);
+
+            if let Err(e) = auth.authenticate() {
+                eprintln!("[clear-display-manager] PAM Authentication failed in daemon: {}", e);
+                continue;
+            }
+
+            if let Err(e) = auth.open_session() {
+                eprintln!("[clear-display-manager] PAM Session failed in daemon: {}", e);
+                continue;
+            }
+
             let user = match users::get_user_by_name(&username) {
                 Some(u) => u,
                 None => {
@@ -1542,16 +1564,22 @@ fn run_daemon() {
                 .uid(user_uid)
                 .gid(user_gid)
                 .current_dir(&home_dir)
-                .env_clear()
                 .env("USER", &username)
                 .env("LOGNAME", &username)
                 .env("HOME", home_dir.to_str().unwrap())
                 .env("SHELL", &shell)
                 .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
                 .env("XDG_RUNTIME_DIR", &user_runtime_dir)
+                .env("XDG_SESSION_TYPE", if is_wayland { "wayland" } else { "x11" })
+                .env("XDG_SESSION_CLASS", "user")
                 .stdin(std::process::Stdio::inherit())
                 .stdout(std::process::Stdio::inherit())
                 .stderr(std::process::Stdio::inherit());
+
+            // Filter out sudo env vars so they don't leak into the user session
+            for key in &["SUDO_USER", "SUDO_UID", "SUDO_GID", "SUDO_COMMAND"] {
+                session_cmd.env_remove(key);
+            }
 
             let username_c = std::ffi::CString::new(username.clone()).unwrap();
             unsafe {
