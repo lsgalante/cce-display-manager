@@ -1217,6 +1217,7 @@ fn run_daemon() {
         let exe_path = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/clear-display-manager"));
 
         let mut child = std::process::Command::new("cage")
+            .arg("-s")
             .arg("--")
             .arg(exe_path)
             .arg("--greeter")
