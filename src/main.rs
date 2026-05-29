@@ -1571,10 +1571,16 @@ fn run_daemon() {
                 .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
                 .env("XDG_RUNTIME_DIR", &user_runtime_dir)
                 .env("XDG_SESSION_TYPE", if is_wayland { "wayland" } else { "x11" })
-                .env("XDG_SESSION_CLASS", "user")
-                .stdin(std::process::Stdio::inherit())
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit());
+                .env("XDG_SESSION_CLASS", "user");
+            let log_file = std::fs::File::create("/tmp/clear-display-manager-session.log");
+            if let Ok(ref f) = log_file {
+                session_cmd.stdout(std::process::Stdio::from(f.try_clone().unwrap()));
+                session_cmd.stderr(std::process::Stdio::from(f.try_clone().unwrap()));
+            } else {
+                session_cmd.stdout(std::process::Stdio::inherit());
+                session_cmd.stderr(std::process::Stdio::inherit());
+            }
+            session_cmd.stdin(std::process::Stdio::null());
 
             // Filter out sudo env vars so they don't leak into the user session
             for key in &["SUDO_USER", "SUDO_UID", "SUDO_GID", "SUDO_COMMAND"] {
