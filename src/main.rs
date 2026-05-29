@@ -944,8 +944,9 @@ impl PointerHandler for AppState {
         for event in events {
             let (x, y) = event.position;
             if let Some(state) = &mut self.state {
-                state.cursor_x = x as f32;
-                state.cursor_y = y as f32;
+                let ratio = state.compositor_scale / state.scale;
+                state.cursor_x = (x * ratio) as f32;
+                state.cursor_y = (y * ratio) as f32;
             }
 
             match &event.kind {
