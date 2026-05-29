@@ -577,11 +577,6 @@ impl State {
         };
 
         state.apply_layout();
-        if state.username_box.text.is_empty() {
-            state.username_box.focus();
-        } else {
-            state.password_box.focus();
-        }
         state.upload_vertices();
         state
     }
@@ -801,37 +796,36 @@ impl State {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum AuthEvent {
-    Success { username: String },
-    Failure(String),
+    Success { request_id: u64, username: String },
+    Failure { request_id: u64, err_msg: String },
+    Info { request_id: u64, msg: String },
 }
 
-fn authenticate_user(username: String, password: String, sender: channel::Sender<AuthEvent>) {
+fn authenticate_user(request_id: u64, username: String, password: String, sender: channel::Sender<AuthEvent>) {
     std::thread::spawn(move || {
         let service = "clear-display-manager";
         
-        let mut auth = match pam::Authenticator::with_password(service) {
+        let mut auth = match PamSession::new(service, &username, &password, request_id, Some(sender.clone())) {
             Ok(a) => a,
             Err(_) => {
-                match pam::Authenticator::with_password("login") {
+                match PamSession::new("login", &username, &password, request_id, Some(sender.clone())) {
                     Ok(a) => a,
                     Err(e) => {
-                        let _ = sender.send(AuthEvent::Failure(format!("PAM Init Error: {}", e)));
+                        let _ = sender.send(AuthEvent::Failure { request_id, err_msg: format!("PAM Init Error: {:?}", e) });
                         return;
                     }
                 }
             }
         };
 
-        auth.get_handler().set_credentials(username.clone(), password);
-
         match auth.authenticate() {
             Ok(_) => {
-                let _ = sender.send(AuthEvent::Success { username });
+                let _ = sender.send(AuthEvent::Success { request_id, username });
             }
             Err(e) => {
-                let _ = sender.send(AuthEvent::Failure(format!("Authentication failed: {}", e)));
+                let _ = sender.send(AuthEvent::Failure { request_id, err_msg: format!("Authentication failed: {:?}", e) });
             }
         }
     });
@@ -860,6 +854,7 @@ struct AppState {
     shift_pressed: bool,
     pressed_key: Option<PressedKey>,
     auth_sender: channel::Sender<AuthEvent>,
+    auth_request_id: u64,
 }
 
 #[allow(dead_code)]
@@ -1099,15 +1094,18 @@ impl PointerHandler for AppState {
                                 if username.is_empty() {
                                     st.status_lbl.text = "Username cannot be empty".to_string();
                                     st.status_lbl.is_error = true;
+                                    st.username_box.focus();
                                 } else if password.is_empty() {
                                     st.status_lbl.text = "Password cannot be empty".to_string();
                                     st.status_lbl.is_error = true;
+                                    st.password_box.focus();
                                 } else {
+                                    self.auth_request_id += 1;
                                     st.status_lbl.text = "Authenticating...".to_string();
                                     st.status_lbl.is_error = false;
                                     st.is_authenticating = true;
-                                    st.login_btn.label = Some("Authenticating...".to_string());
-                                    authenticate_user(username, password, self.auth_sender.clone());
+                                    st.login_btn.base_mut().unwrap().label = Some("Authenticating...".to_string());
+                                    authenticate_user(self.auth_request_id, username, password, self.auth_sender.clone());
                                 }
                                 changed = true;
                             }
@@ -1169,13 +1167,48 @@ impl AppState {
 
         if state == ElementState::Pressed {
             if let Some(st) = &mut self.state {
+                // If we are currently in fingerprint authentication and the user starts typing a password,
+                // cancel the fingerprint auth and let them type.
                 if st.is_authenticating {
-                    return;
+                    if st.password_box.text.is_empty() {
+                        let is_typing = match &logical_key {
+                            Key::Character(_) | Key::Named(NamedKey::Backspace) | Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Space) => true,
+                            _ => false,
+                        };
+                        if is_typing {
+                            self.auth_request_id += 1;
+                            st.is_authenticating = false;
+                            st.login_btn.base_mut().unwrap().label = Some("Log In".to_string());
+                            st.status_lbl.text = "Enter password to start".to_string();
+                            st.status_lbl.is_error = false;
+                        } else {
+                            let is_nav = match &logical_key {
+                                Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => true,
+                                _ => false,
+                            };
+                            if !is_nav {
+                                return;
+                            }
+                        }
+                    } else {
+                        return;
+                    }
                 }
+
                 let mut changed = false;
 
-                // Handle Tab navigation between username and password boxes
-                if logical_key == Key::Named(NamedKey::Tab) {
+                // Handle Up/Down navigation to cycle sessions
+                if logical_key == Key::Named(NamedKey::ArrowUp) && !st.session_list.sessions.is_empty() {
+                    let len = st.session_list.sessions.len();
+                    st.session_list.selected_idx = (st.session_list.selected_idx + len - 1) % len;
+                    st.session_list.hovered_idx = None;
+                    changed = true;
+                } else if logical_key == Key::Named(NamedKey::ArrowDown) && !st.session_list.sessions.is_empty() {
+                    let len = st.session_list.sessions.len();
+                    st.session_list.selected_idx = (st.session_list.selected_idx + 1) % len;
+                    st.session_list.hovered_idx = None;
+                    changed = true;
+                } else if logical_key == Key::Named(NamedKey::Tab) {
                     let is_user_focused = clear_ui::widget::focus::is_focused(&st.username_box);
                     if is_user_focused {
                         st.username_box.unfocus();
@@ -1184,6 +1217,37 @@ impl AppState {
                         st.password_box.unfocus();
                         st.username_box.focus();
                     }
+                    changed = true;
+                } else if logical_key == Key::Named(NamedKey::Enter) && clear_ui::widget::focus::is_focused(&st.password_box) {
+                    // Process Enter in the password box to commit the buffer
+                    st.password_box.keyboard_input(&custom_event);
+
+                    // Extract login username and password
+                    let username = st.username_box.text.trim().to_string();
+                    let password = st.password_box.text.trim().to_string();
+
+                    if username.is_empty() {
+                        st.status_lbl.text = "Username cannot be empty".to_string();
+                        st.status_lbl.is_error = true;
+                        st.username_box.focus();
+                    } else if password.is_empty() {
+                        st.status_lbl.text = "Password cannot be empty".to_string();
+                        st.status_lbl.is_error = true;
+                        st.password_box.focus();
+                    } else {
+                        self.auth_request_id += 1;
+                        st.status_lbl.text = "Authenticating...".to_string();
+                        st.status_lbl.is_error = false;
+                        st.is_authenticating = true;
+                        st.login_btn.base_mut().unwrap().label = Some("Authenticating...".to_string());
+                        authenticate_user(self.auth_request_id, username, password, self.auth_sender.clone());
+                    }
+                    changed = true;
+                } else if logical_key == Key::Named(NamedKey::Enter) && clear_ui::widget::focus::is_focused(&st.username_box) {
+                    // Pressing enter in the username box commits and shifts focus to the password box
+                    st.username_box.keyboard_input(&custom_event);
+                    st.username_box.unfocus();
+                    st.password_box.focus();
                     changed = true;
                 } else {
                     for w in st.widgets_iter_mut() {
@@ -1358,6 +1422,7 @@ fn run_greeter() {
         shift_pressed: false,
         pressed_key: None,
         auth_sender,
+        auth_request_id: 0,
     };
 
     event_queue.roundtrip(&mut app).unwrap();
@@ -1392,6 +1457,22 @@ fn run_greeter() {
     app.surface = Some(surface);
     app.state = Some(state);
 
+    // Set initial focus now that State is in its final, stable memory location inside app.state
+    if let Some(ref mut st) = app.state {
+        st.password_box.focus();
+        st.upload_vertices();
+
+        // Start background fingerprint/empty-password authentication if username is prepopulated!
+        let username = st.username_box.text.trim().to_string();
+        if !username.is_empty() {
+            app.auth_request_id += 1;
+            st.is_authenticating = true;
+            st.login_btn.base_mut().unwrap().label = Some("Authenticating...".to_string());
+            st.status_lbl.text = "Scan finger to login or type password".to_string();
+            authenticate_user(app.auth_request_id, username, String::new(), app.auth_sender.clone());
+        }
+    }
+
     let mut event_loop = EventLoop::try_new().unwrap();
     let loop_handle = event_loop.handle();
     WaylandSource::new(conn, event_queue).insert(loop_handle.clone()).unwrap();
@@ -1399,19 +1480,39 @@ fn run_greeter() {
     loop_handle.insert_source(auth_receiver, |event, _metadata, app_state| {
         match event {
             channel::Event::Msg(msg) => {
+                let ev_request_id = match &msg {
+                    AuthEvent::Success { request_id, .. } => *request_id,
+                    AuthEvent::Failure { request_id, .. } => *request_id,
+                    AuthEvent::Info { request_id, .. } => *request_id,
+                };
+
+                if ev_request_id != app_state.auth_request_id {
+                    // Ignore stale/cancelled auth events
+                    return;
+                }
+
                 if let Some(st) = &mut app_state.state {
-                    st.is_authenticating = false;
-                    st.login_btn.label = Some("Log In".to_string());
                     match msg {
-                        AuthEvent::Success { username } => {
+                        AuthEvent::Success { username, .. } => {
+                            st.is_authenticating = false;
+                            st.login_btn.base_mut().unwrap().label = Some("Log In".to_string());
                             st.status_lbl.text = format!("Welcome, {}!", username);
                             st.status_lbl.is_error = false;
                             st.login_success = true;
                             app_state.exit = true;
                         }
-                        AuthEvent::Failure(err_msg) => {
+                        AuthEvent::Failure { err_msg, .. } => {
+                            st.is_authenticating = false;
+                            st.login_btn.base_mut().unwrap().label = Some("Log In".to_string());
                             st.status_lbl.text = err_msg;
                             st.status_lbl.is_error = true;
+                            st.password_box.text.clear();
+                            st.password_box.edit_buffer.clear();
+                            st.password_box.focus();
+                        }
+                        AuthEvent::Info { msg, .. } => {
+                            st.status_lbl.text = msg;
+                            st.status_lbl.is_error = false;
                         }
                     }
                     st.upload_vertices();
@@ -1449,6 +1550,8 @@ fn run_greeter() {
 struct PamSessionData {
     username: String,
     password: String,
+    request_id: u64,
+    sender: Option<channel::Sender<AuthEvent>>,
 }
 
 extern "C" fn pam_conversation_fn(
@@ -1468,12 +1571,20 @@ extern "C" fn pam_conversation_fn(
         unsafe {
             let m = &**msg.offset(i);
             let r = &mut *resp.offset(i);
-            if m.msg_style == pam_sys::PamMessageStyle::PROMPT_ECHO_ON as libc::c_int {
+            let style = m.msg_style;
+            if style == pam_sys::PamMessageStyle::PROMPT_ECHO_ON as libc::c_int {
                 let user_c = std::ffi::CString::new(data.username.clone()).unwrap();
                 r.resp = libc::strdup(user_c.as_ptr());
-            } else if m.msg_style == pam_sys::PamMessageStyle::PROMPT_ECHO_OFF as libc::c_int {
+            } else if style == pam_sys::PamMessageStyle::PROMPT_ECHO_OFF as libc::c_int {
                 let pass_c = std::ffi::CString::new(data.password.clone()).unwrap();
                 r.resp = libc::strdup(pass_c.as_ptr());
+            } else if style == pam_sys::PamMessageStyle::ERROR_MSG as libc::c_int || style == pam_sys::PamMessageStyle::TEXT_INFO as libc::c_int {
+                if !m.msg.is_null() {
+                    let msg_str = std::ffi::CStr::from_ptr(m.msg).to_string_lossy().into_owned();
+                    if let Some(ref sender) = data.sender {
+                        let _ = sender.send(AuthEvent::Info { request_id: data.request_id, msg: msg_str });
+                    }
+                }
             }
         }
     }
@@ -1489,11 +1600,13 @@ struct PamSession {
 }
 
 impl PamSession {
-    fn new(service: &str, username: &str, password: &str) -> Result<Self, pam_sys::PamReturnCode> {
+    fn new(service: &str, username: &str, password: &str, request_id: u64, sender: Option<channel::Sender<AuthEvent>>) -> Result<Self, pam_sys::PamReturnCode> {
         let mut handle: *mut pam_sys::PamHandle = std::ptr::null_mut();
         let data = Box::new(PamSessionData {
             username: username.to_string(),
             password: password.to_string(),
+            request_id,
+            sender,
         });
         
         let conv = pam_sys::PamConversation {
@@ -1510,11 +1623,28 @@ impl PamSession {
             let pass_c = std::ffi::CString::new(password).unwrap();
             let _ = pam_sys::raw::pam_set_item(handle, pam_sys::PamItemType::AUTHTOK as libc::c_int, pass_c.as_ptr() as *const libc::c_void);
             
-            let tty_c = std::ffi::CString::new("tty1").unwrap();
+            let raw_tty = std::fs::read_link("/proc/self/fd/0")
+                .ok()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| "tty1".to_string());
+            let is_real_tty = raw_tty.starts_with("tty");
+            let tty_name = if is_real_tty { raw_tty } else { "tty1".to_string() };
+
+            let tty_c = std::ffi::CString::new(tty_name).unwrap();
             let _ = pam_sys::raw::pam_set_item(handle, pam_sys::PamItemType::TTY as libc::c_int, tty_c.as_ptr() as *const libc::c_void);
         }
 
         Ok(Self { handle, _data: data, has_open_session: false })
+    }
+
+    fn putenv(&mut self, name_value: &str) -> Result<(), pam_sys::PamReturnCode> {
+        let c_str = std::ffi::CString::new(name_value).unwrap();
+        let rc = unsafe { pam_sys::raw::pam_putenv(self.handle, c_str.as_ptr()) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(unsafe { std::mem::transmute(rc as u8) })
+        }
     }
 
     fn authenticate(&mut self) -> Result<(), pam_sys::PamReturnCode> {
@@ -1601,12 +1731,20 @@ fn run_daemon() {
         std::process::exit(1);
     }
 
+    let raw_tty = std::fs::read_link("/proc/self/fd/0")
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "tty1".to_string());
+    let is_real_tty = raw_tty.starts_with("tty");
+    let tty_name = if is_real_tty { raw_tty } else { "tty1".to_string() };
+
     // Redirect stdout and stderr of the daemon to a log file
+    let log_path = format!("/tmp/clear-display-manager-daemon-{}.log", tty_name);
     if let Ok(log_file) = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
-        .open("/tmp/clear-display-manager-daemon.log")
+        .open(&log_path)
     {
         use std::os::unix::io::AsRawFd;
         let fd = log_file.as_raw_fd();
@@ -1616,17 +1754,31 @@ fn run_daemon() {
         }
     }
 
-    println!("[clear-display-manager] Starting display manager daemon...");
+    println!("[clear-display-manager] Starting display manager daemon on {}...", tty_name);
 
-    let runtime_dir = "/run/clear-display-manager";
-    if !std::path::Path::new(runtime_dir).exists() {
-        std::fs::create_dir_all(runtime_dir).expect("failed to create runtime dir");
+    let runtime_dir = format!("/run/clear-display-manager-{}", tty_name);
+    if !std::path::Path::new(&runtime_dir).exists() {
+        std::fs::create_dir_all(&runtime_dir).expect("failed to create runtime dir");
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(runtime_dir, std::fs::Permissions::from_mode(0o700))
+        std::fs::set_permissions(&runtime_dir, std::fs::Permissions::from_mode(0o700))
             .expect("failed to set runtime dir permissions");
     }
 
     loop {
+        if is_real_tty {
+            println!("[clear-display-manager] Waiting for {} to become the active TTY...", tty_name);
+            loop {
+                if let Ok(active_tty) = std::fs::read_to_string("/sys/class/tty/tty0/active") {
+                    let active_tty = active_tty.trim();
+                    if active_tty == tty_name {
+                        println!("[clear-display-manager] {} is now active. Spawning greeter.", tty_name);
+                        break;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        }
+
         println!("[clear-display-manager] Spawning greeter session via cage...");
 
         let exe_path = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/clear-display-manager"));
@@ -1636,7 +1788,7 @@ fn run_daemon() {
             .arg("--")
             .arg(exe_path)
             .arg("--greeter")
-            .env("XDG_RUNTIME_DIR", runtime_dir)
+            .env("XDG_RUNTIME_DIR", &runtime_dir)
             .env("LIBSEAT_BACKEND", "seatd")
             .env("WLR_DRM_NO_MODIFIERS", "1")
             .env("WLR_DRM_DEVICES", "/dev/dri/card1:/dev/dri/card0")
@@ -1691,11 +1843,20 @@ fn run_daemon() {
 
             println!("[clear-display-manager] Launching user session Exec: '{}' (Wayland: {}) for user: '{}'", exec, is_wayland, username);
             
-            let service = "clear-display-manager";
-            let mut auth = match PamSession::new(service, &username, &password) {
+            let service = if password.is_empty() {
+                "clear-display-manager-autologin"
+            } else {
+                "clear-display-manager"
+            };
+            let mut auth = match PamSession::new(service, &username, &password, 0, None) {
                 Ok(a) => a,
                 Err(_) => {
-                    match PamSession::new("login", &username, &password) {
+                    let fallback_service = if password.is_empty() {
+                        "ly-autologin"
+                    } else {
+                        "login"
+                    };
+                    match PamSession::new(fallback_service, &username, &password, 0, None) {
                         Ok(a) => a,
                         Err(e) => {
                             eprintln!("[clear-display-manager] PAM Init Error in daemon: {:?}", e);
@@ -1704,6 +1865,14 @@ fn run_daemon() {
                     }
                 }
             };
+
+            let session_type_env = if is_wayland {
+                "XDG_SESSION_TYPE=wayland"
+            } else {
+                "XDG_SESSION_TYPE=x11"
+            };
+            let _ = auth.putenv(session_type_env);
+            let _ = auth.putenv("XDG_SESSION_CLASS=user");
 
             if let Err(e) = auth.authenticate() {
                 eprintln!("[clear-display-manager] PAM Authentication failed in daemon: {:?}", e);
