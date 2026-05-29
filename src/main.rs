@@ -1079,6 +1079,23 @@ delegate_keyboard!(AppState);
 delegate_registry!(AppState);
 delegate_output!(AppState);
 
+#[derive(serde::Deserialize, Debug, Default)]
+struct SystemConfig {
+    scale: Option<f64>,
+}
+
+fn load_system_config() -> SystemConfig {
+    let path = "/etc/clear.toml";
+    if std::path::Path::new(path).exists() {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if let Ok(config) = toml::from_str(&content) {
+                return config;
+            }
+        }
+    }
+    SystemConfig::default()
+}
+
 fn run_greeter() {
     let conn = Connection::connect_to_env().expect("Wayland connection");
     let (globals, mut event_queue) = registry_queue_init(&conn).expect("registry init");
@@ -1115,7 +1132,10 @@ fn run_greeter() {
 
     event_queue.roundtrip(&mut app).unwrap();
 
-    let scale = clear_ui::wayland::detect_scale_factor(&app.output_state);
+    let sys_config = load_system_config();
+    let scale = sys_config.scale.unwrap_or_else(|| {
+        clear_ui::wayland::detect_scale_factor(&app.output_state)
+    });
     let surface = app.compositor_state.create_surface(&qh);
     surface.set_buffer_scale(scale as i32);
 
