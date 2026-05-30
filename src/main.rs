@@ -1165,13 +1165,16 @@ impl AppState {
             shift: self.shift_pressed,
         };
 
+        let is_ctrl_p = self.ctrl_pressed && (keysym == xkeysym::Keysym::p || keysym == xkeysym::Keysym::P);
+        let is_ctrl_n = self.ctrl_pressed && (keysym == xkeysym::Keysym::n || keysym == xkeysym::Keysym::N);
+
         if state == ElementState::Pressed {
             if let Some(st) = &mut self.state {
                 // If we are currently in fingerprint authentication and the user starts typing a password,
                 // cancel the fingerprint auth and let them type.
                 if st.is_authenticating {
                     if st.password_box.text.is_empty() {
-                        let is_typing = match &logical_key {
+                        let is_typing = !self.ctrl_pressed && match &logical_key {
                             Key::Character(_) | Key::Named(NamedKey::Backspace) | Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Space) => true,
                             _ => false,
                         };
@@ -1184,7 +1187,7 @@ impl AppState {
                         } else {
                             let is_nav = match &logical_key {
                                 Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => true,
-                                _ => false,
+                                _ => is_ctrl_p || is_ctrl_n,
                             };
                             if !is_nav {
                                 return;
@@ -1197,13 +1200,16 @@ impl AppState {
 
                 let mut changed = false;
 
-                // Handle Up/Down navigation to cycle sessions
-                if logical_key == Key::Named(NamedKey::ArrowUp) && !st.session_list.sessions.is_empty() {
+                // Handle Up/Down or Ctrl+P/N navigation to cycle sessions
+                let cycle_up = (logical_key == Key::Named(NamedKey::ArrowUp) || is_ctrl_p) && !st.session_list.sessions.is_empty();
+                let cycle_down = (logical_key == Key::Named(NamedKey::ArrowDown) || is_ctrl_n) && !st.session_list.sessions.is_empty();
+
+                if cycle_up {
                     let len = st.session_list.sessions.len();
                     st.session_list.selected_idx = (st.session_list.selected_idx + len - 1) % len;
                     st.session_list.hovered_idx = None;
                     changed = true;
-                } else if logical_key == Key::Named(NamedKey::ArrowDown) && !st.session_list.sessions.is_empty() {
+                } else if cycle_down {
                     let len = st.session_list.sessions.len();
                     st.session_list.selected_idx = (st.session_list.selected_idx + 1) % len;
                     st.session_list.hovered_idx = None;
@@ -1886,6 +1892,14 @@ fn run_daemon() {
 
             let pam_env = auth.get_env();
             println!("[clear-display-manager] PAM Environment variables: {:?}", pam_env);
+
+            if let Some((_, session_id)) = pam_env.iter().find(|(k, _)| k == "XDG_SESSION_ID") {
+                println!("[clear-display-manager] Explicitly activating logind session {} via loginctl...", session_id);
+                let _ = std::process::Command::new("loginctl")
+                    .arg("activate")
+                    .arg(session_id)
+                    .status();
+            }
 
             let user = match users::get_user_by_name(&username) {
                 Some(u) => u,
