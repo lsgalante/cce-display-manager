@@ -11,7 +11,7 @@ use smithay_client_toolkit::{
     output::{OutputHandler, OutputState},
     seat::{
         keyboard::KeyboardHandler,
-        pointer::PointerHandler,
+        pointer::{PointerHandler, ThemedPointer, ThemeSpec, CursorIcon},
         Capability, SeatHandler, SeatState,
     },
     shell::{
@@ -345,7 +345,7 @@ impl Widget for SessionList {
         labels
     }
 
-    fn cursor_moved(&mut self, px: f32, py: f32) -> bool {
+    fn on_cursor_moved(&mut self, px: f32, py: f32) -> bool {
         let old_hovered = self.hovered_idx;
         self.hovered_idx = None;
         if self.hit_test(px, py) {
@@ -441,7 +441,7 @@ impl State {
 
         let surface = instance.create_surface(wayland_handle).expect("wgpu surface");
         let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            power_preference: wgpu::PowerPreference::LowPower,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
         }).await.expect("adapter");
@@ -528,13 +528,30 @@ impl State {
             }
         };
 
+        let last_session_path = "/var/lib/clear-display-manager/last_session";
+        let last_session_exec = if std::path::Path::new(last_session_path).exists() {
+            std::fs::read_to_string(last_session_path)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| String::new())
+        } else {
+            String::new()
+        };
+
+        let mut selected_idx = 0;
+        if !last_session_exec.is_empty() {
+            if let Some(pos) = sessions.iter().position(|s| s.exec == last_session_exec) {
+                selected_idx = pos;
+            }
+        }
+
         let bg = ContentBg::new();
         let card = LoginCard::new();
         let username_box = TextBox::new(current_user).with_label("USERNAME");
         let password_box = TextBox::new(String::new()).with_password(true).with_label("PASSWORD");
         let login_btn = Button::new(0.0, 0.0, 300.0, 36.0).with_label("Log In");
         let status_lbl = StatusLabel::new("Enter password to start".to_string());
-        let session_list = SessionList::new(sessions);
+        let mut session_list = SessionList::new(sessions);
+        session_list.selected_idx = selected_idx;
 
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Vertex Buffer"),
@@ -841,7 +858,7 @@ struct AppState {
     output_state: OutputState,
 
     seats: Vec<wl_seat::WlSeat>,
-    pointer: Option<wl_pointer::WlPointer>,
+    pointer: Option<ThemedPointer>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
 
     window: Option<XdgWindow>,
@@ -914,8 +931,15 @@ impl SeatHandler for AppState {
 
     fn new_capability(&mut self, _conn: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, capability: Capability) {
         if capability == Capability::Pointer && self.pointer.is_none() {
-            let pointer = self.seat_state.get_pointer(qh, &seat).unwrap();
-            self.pointer = Some(pointer);
+            let surface = self.compositor_state.create_surface(qh);
+            let themed_pointer = self.seat_state.get_pointer_with_theme(
+                qh,
+                &seat,
+                self.shm_state.wl_shm(),
+                surface,
+                ThemeSpec::System,
+            ).unwrap();
+            self.pointer = Some(themed_pointer);
         }
         if capability == Capability::Keyboard && self.keyboard.is_none() {
             let keyboard = self.seat_state.get_keyboard(qh, &seat, None).unwrap();
@@ -955,7 +979,11 @@ impl PointerHandler for AppState {
             }
 
             match &event.kind {
-                PointerEventKind::Enter { .. } => {}
+                PointerEventKind::Enter { .. } => {
+                    if let Some(ref themed_pointer) = self.pointer {
+                        let _ = themed_pointer.set_cursor(_conn, CursorIcon::Default);
+                    }
+                }
                 PointerEventKind::Leave { .. } => {}
                 PointerEventKind::Motion { .. } => {
                     if let Some(state) = &mut self.state {
@@ -1130,6 +1158,12 @@ impl AppState {
         if self.ctrl_pressed && (keysym == xkeysym::Keysym::c || keysym == xkeysym::Keysym::C) {
             eprintln!("[clear-display-manager] Ctrl+C pressed. Aborting greeter.");
             std::process::exit(130);
+        }
+
+        // Check for F5 to request daemon restart
+        if keysym == xkeysym::Keysym::F5 {
+            eprintln!("[clear-display-manager] F5 pressed. Requesting daemon restart.");
+            std::process::exit(135);
         }
 
         let logical_key = match keysym {
@@ -1397,6 +1431,11 @@ fn load_system_config() -> SystemConfig {
 }
 
 fn run_greeter() {
+    let sys_config = load_system_config();
+    let layout_scale = sys_config.scale.unwrap_or(1.0);
+    let cursor_size = (24.0 * layout_scale) as u32;
+    std::env::set_var("XCURSOR_SIZE", cursor_size.to_string());
+
     let conn = Connection::connect_to_env().expect("Wayland connection");
     let (globals, mut event_queue) = registry_queue_init(&conn).expect("registry init");
     let qh = event_queue.handle();
@@ -1468,14 +1507,24 @@ fn run_greeter() {
         st.password_box.focus();
         st.upload_vertices();
 
-        // Start background fingerprint/empty-password authentication if username is prepopulated!
+        // Start background fingerprint/empty-password authentication if username is prepopulated and fprintd is enabled!
         let username = st.username_box.text.trim().to_string();
         if !username.is_empty() {
-            app.auth_request_id += 1;
-            st.is_authenticating = true;
-            st.login_btn.base_mut().unwrap().label = Some("Authenticating...".to_string());
-            st.status_lbl.text = "Scan finger to login or type password".to_string();
-            authenticate_user(app.auth_request_id, username, String::new(), app.auth_sender.clone());
+            let has_fprint = std::fs::read_to_string("/etc/pam.d/clear-display-manager")
+                .map(|content| {
+                    content.lines().any(|line| {
+                        let trimmed = line.trim();
+                        trimmed.contains("pam_fprintd.so") && !trimmed.starts_with('#')
+                    })
+                })
+                .unwrap_or(false);
+            if has_fprint {
+                app.auth_request_id += 1;
+                st.is_authenticating = true;
+                st.login_btn.base_mut().unwrap().label = Some("Authenticating...".to_string());
+                st.status_lbl.text = "Scan finger to login or type password".to_string();
+                authenticate_user(app.auth_request_id, username, String::new(), app.auth_sender.clone());
+            }
         }
     }
 
@@ -1786,8 +1835,11 @@ fn run_daemon() {
         }
 
         println!("[clear-display-manager] Spawning greeter session via cage...");
-
-        let exe_path = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/clear-display-manager"));
+ 
+        let mut exe_path = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/clear-display-manager"));
+        if !exe_path.exists() {
+            exe_path = std::path::PathBuf::from("/usr/bin/clear-display-manager");
+        }
 
         let mut child = std::process::Command::new("cage")
             .arg("-s")
@@ -1833,156 +1885,198 @@ fn run_daemon() {
             std::process::exit(0);
         }
 
+        if status.code() == Some(135) {
+            println!("[clear-display-manager] Restart requested via F5. Re-executing daemon...");
+            let mut exe_path = std::path::PathBuf::from("/usr/bin/clear-display-manager");
+            if !exe_path.exists() {
+                exe_path = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/clear-display-manager"));
+            }
+            let args: Vec<String> = std::env::args().collect();
+            use std::os::unix::process::CommandExt;
+            let mut cmd = std::process::Command::new(&exe_path);
+            cmd.args(&args[1..]);
+            let err = cmd.exec();
+            eprintln!("[clear-display-manager] Failed to re-exec daemon: {:?}", err);
+        }
+
         if auth_success.is_none() {
             // Sleep briefly to prevent high CPU usage if the greeter keeps crashing on startup
             std::thread::sleep(std::time::Duration::from_millis(1000));
         }
 
         if let Some((username, exec, is_wayland, password)) = auth_success {
-            // Write last logged-in user to persistent file
+            // Write last logged-in user and session to persistent files
             let var_lib = "/var/lib/clear-display-manager";
             if let Err(e) = std::fs::create_dir_all(var_lib) {
                 eprintln!("[clear-display-manager] Failed to create var lib dir: {:?}", e);
-            } else if let Err(e) = std::fs::write(format!("{}/last_user", var_lib), &username) {
-                eprintln!("[clear-display-manager] Failed to write last_user file: {:?}", e);
+            } else {
+                if let Err(e) = std::fs::write(format!("{}/last_user", var_lib), &username) {
+                    eprintln!("[clear-display-manager] Failed to write last_user file: {:?}", e);
+                }
+                if let Err(e) = std::fs::write(format!("{}/last_session", var_lib), &exec) {
+                    eprintln!("[clear-display-manager] Failed to write last_session file: {:?}", e);
+                }
             }
 
             println!("[clear-display-manager] Launching user session Exec: '{}' (Wayland: {}) for user: '{}'", exec, is_wayland, username);
             
-            let service = if password.is_empty() {
-                "clear-display-manager-autologin"
-            } else {
-                "clear-display-manager"
-            };
-            let mut auth = match PamSession::new(service, &username, &password, 0, None) {
-                Ok(a) => a,
-                Err(_) => {
-                    let fallback_service = if password.is_empty() {
-                        "ly-autologin"
-                    } else {
-                        "login"
-                    };
-                    match PamSession::new(fallback_service, &username, &password, 0, None) {
-                        Ok(a) => a,
-                        Err(e) => {
-                            eprintln!("[clear-display-manager] PAM Init Error in daemon: {:?}", e);
-                            continue;
+            let pid = unsafe { libc::fork() };
+            if pid < 0 {
+                eprintln!("[clear-display-manager] Fork failed: {}", std::io::Error::last_os_error());
+                continue;
+            } else if pid == 0 {
+                // Child process: execute PAM session and spawn the compositor/user session
+                let service = if password.is_empty() {
+                    "clear-display-manager-autologin"
+                } else {
+                    "clear-display-manager"
+                };
+                let mut auth = match PamSession::new(service, &username, &password, 0, None) {
+                    Ok(a) => a,
+                    Err(_) => {
+                        let fallback_service = if password.is_empty() {
+                            "ly-autologin"
+                        } else {
+                            "login"
+                        };
+                        match PamSession::new(fallback_service, &username, &password, 0, None) {
+                            Ok(a) => a,
+                            Err(e) => {
+                                eprintln!("[clear-display-manager] PAM Init Error in child: {:?}", e);
+                                std::process::exit(1);
+                            }
                         }
                     }
-                }
-            };
+                };
 
-            let session_type_env = if is_wayland {
-                "XDG_SESSION_TYPE=wayland"
+                let session_type_env = if is_wayland {
+                    "XDG_SESSION_TYPE=wayland"
+                } else {
+                    "XDG_SESSION_TYPE=x11"
+                };
+                let _ = auth.putenv(session_type_env);
+                let _ = auth.putenv("XDG_SESSION_CLASS=user");
+
+                if let Err(e) = auth.authenticate() {
+                    eprintln!("[clear-display-manager] PAM Authentication failed in child: {:?}", e);
+                    std::process::exit(1);
+                }
+
+                if let Err(e) = auth.open_session() {
+                    eprintln!("[clear-display-manager] PAM Session failed in child: {:?}", e);
+                    std::process::exit(1);
+                }
+
+                let pam_env = auth.get_env();
+                println!("[clear-display-manager] PAM Environment variables: {:?}", pam_env);
+
+                if let Some((_, session_id)) = pam_env.iter().find(|(k, _)| k == "XDG_SESSION_ID") {
+                    println!("[clear-display-manager] Explicitly activating logind session {} via loginctl...", session_id);
+                    let _ = std::process::Command::new("loginctl")
+                        .arg("activate")
+                        .arg(session_id)
+                        .status();
+                }
+
+                let user = match users::get_user_by_name(&username) {
+                    Some(u) => u,
+                    None => {
+                        eprintln!("[clear-display-manager] Error: User '{}' not found in system.", username);
+                        std::process::exit(1);
+                    }
+                };
+
+                let user_uid = user.uid();
+                let user_gid = user.primary_group_id();
+                let home_dir = user.home_dir().to_path_buf();
+                let shell = user.shell().to_str().unwrap_or("/bin/bash").to_string();
+
+                let user_runtime_dir = format!("/run/user/{}", user_uid);
+                
+                let (cmd_bin, cmd_args): (String, Vec<String>) = if is_wayland {
+                    sanitize_exec(&exec)
+                } else {
+                    let (client_bin, client_args) = sanitize_exec(&exec);
+                    let xinit_bin = "/usr/sbin/xinit".to_string();
+                    let mut args = vec![client_bin];
+                    args.extend(client_args);
+                    args.push("--".to_string());
+                    args.push("-keeptty".to_string());
+                    (xinit_bin, args)
+                };
+
+                if cmd_bin.is_empty() {
+                    eprintln!("[clear-display-manager] Error: Resolved execution command is empty.");
+                    std::process::exit(1);
+                }
+
+                println!("[clear-display-manager] Spawning session: {} with args {:?} for UID={}, GID={}", cmd_bin, cmd_args, user_uid, user_gid);
+
+                use std::os::unix::process::CommandExt;
+                let mut session_cmd = std::process::Command::new(&cmd_bin);
+                session_cmd
+                    .args(&cmd_args)
+                    .envs(pam_env)
+                    .current_dir(&home_dir)
+                    .env("USER", &username)
+                    .env("LOGNAME", &username)
+                    .env("HOME", home_dir.to_str().unwrap())
+                    .env("SHELL", &shell)
+                    .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+                    .env("XDG_RUNTIME_DIR", &user_runtime_dir)
+                    .env("XDG_SESSION_TYPE", if is_wayland { "wayland" } else { "x11" })
+                    .env("XDG_SESSION_CLASS", "user")
+                    .stdin(std::process::Stdio::inherit())
+                    .stdout(std::process::Stdio::inherit())
+                    .stderr(std::process::Stdio::inherit());
+
+                // Filter out sudo env vars so they don't leak into the user session
+                for key in &["SUDO_USER", "SUDO_UID", "SUDO_GID", "SUDO_COMMAND"] {
+                    session_cmd.env_remove(key);
+                }
+
+                let username_c = std::ffi::CString::new(username.clone()).unwrap();
+                unsafe {
+                    session_cmd.pre_exec(move || {
+                        if libc::initgroups(username_c.as_ptr(), user_gid as libc::gid_t) != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        if libc::setgid(user_gid as libc::gid_t) != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        if libc::setuid(user_uid as libc::uid_t) != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+
+                match session_cmd.spawn() {
+                    Ok(mut child_proc) => {
+                        let _ = child_proc.wait();
+                    }
+                    Err(e) => {
+                        eprintln!("[clear-display-manager] Failed to launch session: {}", e);
+                    }
+                }
+                println!("[clear-display-manager] User session ended.");
+                std::mem::drop(auth);
+                std::process::exit(0);
             } else {
-                "XDG_SESSION_TYPE=x11"
-            };
-            let _ = auth.putenv(session_type_env);
-            let _ = auth.putenv("XDG_SESSION_CLASS=user");
-
-            if let Err(e) = auth.authenticate() {
-                eprintln!("[clear-display-manager] PAM Authentication failed in daemon: {:?}", e);
-                continue;
-            }
-
-            if let Err(e) = auth.open_session() {
-                eprintln!("[clear-display-manager] PAM Session failed in daemon: {:?}", e);
-                continue;
-            }
-
-            let pam_env = auth.get_env();
-            println!("[clear-display-manager] PAM Environment variables: {:?}", pam_env);
-
-            if let Some((_, session_id)) = pam_env.iter().find(|(k, _)| k == "XDG_SESSION_ID") {
-                println!("[clear-display-manager] Explicitly activating logind session {} via loginctl...", session_id);
-                let _ = std::process::Command::new("loginctl")
-                    .arg("activate")
-                    .arg(session_id)
-                    .status();
-            }
-
-            let user = match users::get_user_by_name(&username) {
-                Some(u) => u,
-                None => {
-                    eprintln!("[clear-display-manager] Error: User '{}' not found in system.", username);
-                    continue;
+                // Parent process: block until the session worker child terminates
+                let mut status: libc::c_int = 0;
+                unsafe {
+                    libc::waitpid(pid, &mut status, 0);
                 }
-            };
+                println!("[clear-display-manager] Session worker child (PID {}) exited with status: {}", pid, status);
 
-            let user_uid = user.uid();
-            let user_gid = user.primary_group_id();
-            let home_dir = user.home_dir().to_path_buf();
-            let shell = user.shell().to_str().unwrap_or("/bin/bash").to_string();
-
-            let user_runtime_dir = format!("/run/user/{}", user_uid);
-            
-            let (cmd_bin, cmd_args): (String, Vec<String>) = if is_wayland {
-                sanitize_exec(&exec)
-            } else {
-                let (client_bin, client_args) = sanitize_exec(&exec);
-                let xinit_bin = "/usr/sbin/xinit".to_string();
-                let mut args = vec![client_bin];
-                args.extend(client_args);
-                args.push("--".to_string());
-                args.push("-keeptty".to_string());
-                (xinit_bin, args)
-            };
-
-            if cmd_bin.is_empty() {
-                eprintln!("[clear-display-manager] Error: Resolved execution command is empty.");
-                continue;
-            }
-
-            println!("[clear-display-manager] Spawning session: {} with args {:?} for UID={}, GID={}", cmd_bin, cmd_args, user_uid, user_gid);
-
-            use std::os::unix::process::CommandExt;
-            let mut session_cmd = std::process::Command::new(&cmd_bin);
-            session_cmd
-                .args(&cmd_args)
-                .envs(pam_env)
-                .current_dir(&home_dir)
-                .env("USER", &username)
-                .env("LOGNAME", &username)
-                .env("HOME", home_dir.to_str().unwrap())
-                .env("SHELL", &shell)
-                .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
-                .env("XDG_RUNTIME_DIR", &user_runtime_dir)
-                .env("XDG_SESSION_TYPE", if is_wayland { "wayland" } else { "x11" })
-                .env("XDG_SESSION_CLASS", "user")
-                .stdin(std::process::Stdio::inherit())
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit());
-
-            // Filter out sudo env vars so they don't leak into the user session
-            for key in &["SUDO_USER", "SUDO_UID", "SUDO_GID", "SUDO_COMMAND"] {
-                session_cmd.env_remove(key);
-            }
-
-            let username_c = std::ffi::CString::new(username.clone()).unwrap();
-            unsafe {
-                session_cmd.pre_exec(move || {
-                    if libc::initgroups(username_c.as_ptr(), user_gid as libc::gid_t) != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    if libc::setgid(user_gid as libc::gid_t) != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    if libc::setuid(user_uid as libc::uid_t) != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-
-            match session_cmd.spawn() {
-                Ok(mut child_proc) => {
-                    let _ = child_proc.wait();
-                }
-                Err(e) => {
-                    eprintln!("[clear-display-manager] Failed to launch session: {}", e);
+                if let Some(vt) = tty_name.strip_prefix("tty").and_then(|s| s.parse::<u32>().ok()) {
+                    println!("[clear-display-manager] Switching back to VT {}...", vt);
+                    let _ = std::process::Command::new("chvt")
+                        .arg(vt.to_string())
+                        .status();
                 }
             }
-            println!("[clear-display-manager] User session ended.");
         }
     }
 }

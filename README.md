@@ -2,7 +2,7 @@
 
 `clear-display-manager` is a premium GUI display manager greeter built using the `clear-ui` framework, leveraging Wayland via `smithay-client-toolkit` and GPU-accelerated graphics via `wgpu`. 
 
-It integrates seamlessly with the rest of the **Clear OS** desktop ecosystem, offering a highly customized login greeter interface that transitions directly into the `clear-window-manager` (River WM) or standard fallback sessions.
+It integrates seamlessly with the rest of the **Clear OS** desktop ecosystem, offering a highly customized login greeter interface that transitions directly into the `clear-computing-environment-client` (River WM) or standard fallback sessions.
 
 ## Features
 
@@ -10,7 +10,7 @@ It integrates seamlessly with the rest of the **Clear OS** desktop ecosystem, of
 - **Session Selector**: Interactive session cyclist allowing selection between the Wayland-based River window manager and a fallback Bash login shell.
 - **Obfuscated Password Fields**: Dedicated custom password widget wrapper around `clear-ui` text inputs.
 - **Focus Cycle Navigation**: Easily navigate fields using standard `Tab` focus switching keys.
-- **Seamless Launch Integration**: Authenticates credentials and starts the session via `/home/lsgalante/Dropbox/Clear/clear-window-manager/start-river.sh`.
+- **Seamless Launch Integration**: Authenticates credentials and starts the session via `/home/lsgalante/Dropbox/Clear/clear-computing-environment-client/start-river.sh`.
 
 ## Architecture
 
