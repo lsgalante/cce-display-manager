@@ -32,7 +32,7 @@ use calloop::{EventLoop, channel};
 use calloop_wayland_source::WaylandSource;
 
 use clear_ui::widget::{
-    Button, ContentBg, TextLabel, Widget, ElementState, MouseButton, Key, NamedKey, KeyEvent, TextBox
+    Button, ContentBg, TextLabel, Element, ElementState, MouseButton, Key, NamedKey, KeyEvent, TextBox
 };
 
 #[repr(C)]
@@ -79,7 +79,7 @@ fn quad_vertices(
     ]
 }
 
-fn widget_vertices(w: &dyn Widget, sw: f32, sh: f32) -> Vec<Vertex> {
+fn widget_vertices(w: &dyn Element, sw: f32, sh: f32) -> Vec<Vertex> {
     let (x, y, ww, h) = w.rect();
     quad_vertices(x, y, ww, h, sw, sh, w.color()).to_vec()
 }
@@ -163,7 +163,7 @@ fn discover_sessions() -> Vec<Session> {
     sessions
 }
 
-// ── Custom LoginCard Container Widget ──
+// ── Custom LoginCard Container Element ──
 #[derive(Debug, Clone)]
 struct LoginCard {
     x: f32, y: f32, w: f32, h: f32,
@@ -175,7 +175,7 @@ impl LoginCard {
     }
 }
 
-impl Widget for LoginCard {
+impl Element for LoginCard {
     fn rect(&self) -> (f32, f32, f32, f32) { (self.x, self.y, self.w, self.h) }
     fn set_rect(&mut self, x: f32, y: f32, w: f32, h: f32) { self.x = x; self.y = y; self.w = w; self.h = h; }
     fn color(&self) -> [f32; 4] { [0.07, 0.07, 0.10, 0.90] } // Sleek dark card background
@@ -228,7 +228,7 @@ impl StatusLabel {
     }
 }
 
-impl Widget for StatusLabel {
+impl Element for StatusLabel {
     fn rect(&self) -> (f32, f32, f32, f32) { (self.x, self.y, self.w, self.h) }
     fn set_rect(&mut self, x: f32, y: f32, w: f32, h: f32) { self.x = x; self.y = y; self.w = w; self.h = h; }
     fn color(&self) -> [f32; 4] { [0.0, 0.0, 0.0, 0.0] } // Transparent background
@@ -249,7 +249,7 @@ impl Widget for StatusLabel {
     }
 }
 
-// ── Custom Session List Panel Widget ──
+// ── Custom Session List Panel Element ──
 #[derive(Debug, Clone)]
 struct SessionList {
     x: f32, y: f32, w: f32, h: f32,
@@ -273,7 +273,7 @@ impl SessionList {
     }
 }
 
-impl Widget for SessionList {
+impl Element for SessionList {
     fn rect(&self) -> (f32, f32, f32, f32) { (self.x, self.y, self.w, self.h) }
     fn set_rect(&mut self, x: f32, y: f32, w: f32, h: f32) { self.x = x; self.y = y; self.w = w; self.h = h; }
     fn color(&self) -> [f32; 4] { [0.07, 0.07, 0.10, 0.70] } // Semi-transparent sleek dark card background
@@ -600,7 +600,7 @@ impl State {
         state
     }
 
-    fn widgets_iter(&self) -> Vec<&dyn Widget> {
+    fn widgets_iter(&self) -> Vec<&dyn Element> {
         vec![
             &self.bg,
             &self.card,
@@ -612,7 +612,7 @@ impl State {
         ]
     }
 
-    fn widgets_iter_mut(&mut self) -> Vec<&mut dyn Widget> {
+    fn widgets_iter_mut(&mut self) -> Vec<&mut dyn Element> {
         vec![
             &mut self.bg,
             &mut self.card,
