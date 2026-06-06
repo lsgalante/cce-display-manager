@@ -40,12 +40,14 @@ use clear_ui::widget::{
 struct Vertex {
     position: [f32; 2],
     color: [f32; 4],
+    clip_circle: [f32; 3],
 }
 
 impl Vertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![
+    const ATTRIBS: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![
         0 => Float32x2,
         1 => Float32x4,
+        2 => Float32x3,
     ];
 
     fn desc() -> wgpu::VertexBufferLayout<'static> {
@@ -68,12 +70,12 @@ fn quad_vertices(
     let y1 = 1.0 - ((y + h) / surface_h) * 2.0;
 
     [
-        Vertex { position: [x0, y0], color },
-        Vertex { position: [x1, y0], color },
-        Vertex { position: [x0, y1], color },
-        Vertex { position: [x1, y0], color },
-        Vertex { position: [x1, y1], color },
-        Vertex { position: [x0, y1], color },
+        Vertex { position: [x0, y0], color, clip_circle: [0.0; 3] },
+        Vertex { position: [x1, y0], color, clip_circle: [0.0; 3] },
+        Vertex { position: [x0, y1], color, clip_circle: [0.0; 3] },
+        Vertex { position: [x1, y0], color, clip_circle: [0.0; 3] },
+        Vertex { position: [x1, y1], color, clip_circle: [0.0; 3] },
+        Vertex { position: [x0, y1], color, clip_circle: [0.0; 3] },
     ]
 }
 
