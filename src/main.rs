@@ -699,8 +699,8 @@ impl State {
         let mut areas: Vec<TextArea> = vec![
             TextArea {
                 buffer: &self.info_buffer,
-                left: 20.0 * scale_f32,
-                top: self.physical_height as f32 - 24.0 * scale_f32,
+                left: (20.0 * scale_f32).round(),
+                top: (self.physical_height as f32 - 24.0 * scale_f32).round(),
                 scale: scale_f32,
                 bounds: TextBounds {
                     left: 0, top: 0,
@@ -725,8 +725,8 @@ impl State {
         for (buf, label) in widget_buffers.iter().zip(widget_labels.iter()) {
             areas.push(TextArea {
                 buffer: buf,
-                left: label.x * scale_f32,
-                top: label.y * scale_f32,
+                left: (label.x * scale_f32).round(),
+                top: (label.y * scale_f32).round(),
                 scale: scale_f32,
                 bounds: TextBounds {
                     left: 0, top: 0,
@@ -1825,6 +1825,27 @@ fn run_daemon() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&runtime_dir, std::fs::Permissions::from_mode(0o700))
             .expect("failed to set runtime dir permissions");
+    }
+    // Ensure polkit-agent-helper-1 has SUID root permissions so cce-authenticator can authenticate sessions
+    let helper_paths = [
+        "/usr/lib/polkit-1/polkit-agent-helper-1",
+        "/usr/lib/policykit-1/polkit-agent-helper-1",
+    ];
+    for path in &helper_paths {
+        if std::path::Path::new(path).exists() {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(metadata) = std::fs::metadata(path) {
+                let mut perms = metadata.permissions();
+                let mode = perms.mode();
+                if (mode & 0o4000) == 0 {
+                    println!("[clear-display-manager] Restoring SUID root permissions to {} (current mode: {:o})", path, mode);
+                    perms.set_mode(mode | 0o4000 | 0o0111);
+                    if let Err(e) = std::fs::set_permissions(path, perms) {
+                        eprintln!("[clear-display-manager] Failed to set permissions on {}: {}", path, e);
+                    }
+                }
+            }
+        }
     }
 
     loop {
