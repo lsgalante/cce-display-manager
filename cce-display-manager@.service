@@ -1,12 +1,12 @@
 [Unit]
-Description=Clear Display Manager on %I
+Description=CCE Display Manager on %I
 After=systemd-user-sessions.service plymouth-quit-active.service
 Conflicts=getty@%i.service
 Before=graphical.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/clear-display-manager
+ExecStart=/usr/bin/cce-display-manager
 StandardInput=tty
 StandardOutput=tty
 TTYPath=/dev/%I

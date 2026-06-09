@@ -5,7 +5,7 @@ build:
 
 install: build
 	mkdir -p ~/.local/bin
-	install -m 755 target/release/clear-display-manager ~/.local/bin/clear-display-manager
+	install -m 755 target/release/cce-display-manager ~/.local/bin/cce-display-manager
 
 run:
 	cargo run

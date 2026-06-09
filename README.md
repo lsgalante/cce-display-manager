@@ -1,6 +1,6 @@
 # Clear Display Manager
 
-`clear-display-manager` is a premium GUI display manager greeter built using the `clear-ui` framework, leveraging Wayland via `smithay-client-toolkit` and GPU-accelerated graphics via `wgpu`. 
+`cce-display-manager` is a premium GUI display manager greeter built using the `clear-ui` framework, leveraging Wayland via `smithay-client-toolkit` and GPU-accelerated graphics via `wgpu`. 
 
 It integrates seamlessly with the rest of the **Clear OS** desktop ecosystem, offering a highly customized login greeter interface that transitions directly into the `clear-computing-environment-client` (River WM) or standard fallback sessions.
 

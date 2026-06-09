@@ -34,6 +34,7 @@ use calloop_wayland_source::WaylandSource;
 use clear_ui::widget::{
     Button, ContentBg, TextLabel, Element, ElementState, MouseButton, Key, NamedKey, KeyEvent, TextBox
 };
+use clear_ui::context::UiContext;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -347,10 +348,10 @@ impl Element for SessionList {
         labels
     }
 
-    fn on_cursor_moved(&mut self, px: f32, py: f32) -> bool {
+    fn on_cursor_moved(&mut self, px: f32, py: f32, ctx: &mut UiContext) -> bool {
         let old_hovered = self.hovered_idx;
         self.hovered_idx = None;
-        if self.hit_test(px, py) {
+        if self.hit_test(px, py, ctx) {
             let item_w = self.w - 20.0;
             for i in 0..self.sessions.len() {
                 let item_y = self.y + 40.0 + i as f32 * 36.0;
@@ -364,9 +365,9 @@ impl Element for SessionList {
         self.hovered_idx != old_hovered
     }
 
-    fn mouse_input(&mut self, button: MouseButton, state: ElementState, px: f32, py: f32) -> bool {
+    fn mouse_input(&mut self, button: MouseButton, state: ElementState, px: f32, py: f32, ctx: &mut UiContext) -> bool {
         if button == MouseButton::Left && state == ElementState::Pressed {
-            if self.hit_test(px, py) {
+            if self.hit_test(px, py, ctx) {
                 let item_w = self.w - 20.0;
                 for i in 0..self.sessions.len() {
                     let item_y = self.y + 40.0 + i as f32 * 36.0;
@@ -401,6 +402,7 @@ struct State {
     login_btn: Button,
     status_lbl: StatusLabel,
     session_list: SessionList,
+    ui_context: clear_ui::context::UiContext,
 
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -516,21 +518,21 @@ impl State {
         let info_buffer = make_text_buffer(&mut font_system, "Press Tab to switch fields • Session selector: Click current session label", 11.0);
 
         // Prepopulate username from last_user file if it exists
-        let last_user_path = "/var/lib/clear-display-manager/last_user";
+        let last_user_path = "/var/lib/cce-display-manager/last_user";
         let current_user = if std::path::Path::new(last_user_path).exists() {
             std::fs::read_to_string(last_user_path)
                 .map(|s| s.trim().to_string())
                 .unwrap_or_else(|_| String::new())
         } else {
             let env_user = std::env::var("USER").unwrap_or_else(|_| String::new());
-            if env_user == "root" || env_user == "clear-display-manager" {
+            if env_user == "root" || env_user == "cce-display-manager" {
                 String::new()
             } else {
                 env_user
             }
         };
 
-        let last_session_path = "/var/lib/clear-display-manager/last_session";
+        let last_session_path = "/var/lib/cce-display-manager/last_session";
         let last_session_exec = if std::path::Path::new(last_session_path).exists() {
             std::fs::read_to_string(last_session_path)
                 .map(|s| s.trim().to_string())
@@ -577,6 +579,7 @@ impl State {
             login_btn,
             status_lbl,
             session_list,
+            ui_context: clear_ui::context::UiContext::new(),
             font_system,
             swash_cache,
             text_atlas,
@@ -665,7 +668,7 @@ impl State {
         let mut verts = Vec::new();
         for w in self.widgets_iter() {
             verts.extend(widget_vertices(w, sw, sh));
-            for (qx, qy, qw, qh, qc) in w.extra_quads() {
+            for (qx, qy, qw, qh, qc) in w.all_quads(&self.ui_context) {
                 verts.extend(quad_vertices(qx, qy, qw, qh, sw, sh, qc));
             }
         }
@@ -813,6 +816,45 @@ impl State {
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
     }
+
+    pub fn widgets_cursor_moved(&mut self, cx: f32, cy: f32) -> bool {
+        let ctx = &mut self.ui_context;
+        let mut changed = false;
+        if self.bg.cursor_moved(cx, cy, ctx) { changed = true; }
+        if self.card.cursor_moved(cx, cy, ctx) { changed = true; }
+        if self.username_box.cursor_moved(cx, cy, ctx) { changed = true; }
+        if self.password_box.cursor_moved(cx, cy, ctx) { changed = true; }
+        if self.login_btn.cursor_moved(cx, cy, ctx) { changed = true; }
+        if self.status_lbl.cursor_moved(cx, cy, ctx) { changed = true; }
+        if self.session_list.cursor_moved(cx, cy, ctx) { changed = true; }
+        changed
+    }
+
+    pub fn widgets_mouse_input(&mut self, button: MouseButton, state: ElementState, cx: f32, cy: f32) -> bool {
+        let ctx = &mut self.ui_context;
+        let mut changed = false;
+        if self.bg.mouse_input(button, state, cx, cy, ctx) { changed = true; }
+        if self.card.mouse_input(button, state, cx, cy, ctx) { changed = true; }
+        if self.username_box.mouse_input(button, state, cx, cy, ctx) { changed = true; }
+        if self.password_box.mouse_input(button, state, cx, cy, ctx) { changed = true; }
+        if self.login_btn.mouse_input(button, state, cx, cy, ctx) { changed = true; }
+        if self.status_lbl.mouse_input(button, state, cx, cy, ctx) { changed = true; }
+        if self.session_list.mouse_input(button, state, cx, cy, ctx) { changed = true; }
+        changed
+    }
+
+    pub fn widgets_keyboard_input(&mut self, event: &KeyEvent) -> bool {
+        let ctx = &mut self.ui_context;
+        let mut changed = false;
+        if self.bg.keyboard_input(event, ctx) { changed = true; }
+        if self.card.keyboard_input(event, ctx) { changed = true; }
+        if self.username_box.keyboard_input(event, ctx) { changed = true; }
+        if self.password_box.keyboard_input(event, ctx) { changed = true; }
+        if self.login_btn.keyboard_input(event, ctx) { changed = true; }
+        if self.status_lbl.keyboard_input(event, ctx) { changed = true; }
+        if self.session_list.keyboard_input(event, ctx) { changed = true; }
+        changed
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -824,7 +866,7 @@ enum AuthEvent {
 
 fn authenticate_user(request_id: u64, username: String, password: String, sender: channel::Sender<AuthEvent>) {
     std::thread::spawn(move || {
-        let service = "clear-display-manager";
+        let service = "cce-display-manager";
         
         let mut auth = match PamSession::new(service, &username, &password, request_id, Some(sender.clone())) {
             Ok(a) => a,
@@ -992,10 +1034,8 @@ impl PointerHandler for AppState {
                         let cx = state.cursor_x;
                         let cy = state.cursor_y;
                         let mut changed = false;
-                        for w in state.widgets_iter_mut() {
-                            if w.cursor_moved(cx, cy) {
-                                changed = true;
-                            }
+                        if state.widgets_cursor_moved(cx, cy) {
+                            changed = true;
                         }
                         if changed {
                             state.upload_vertices();
@@ -1019,14 +1059,15 @@ impl PointerHandler for AppState {
                         let cy = st.cursor_y;
                         if btn == MouseButton::Left {
                             // Unfocus other elements if a click is made
-                            let hit_any = st.status_lbl.hit_test(cx, cy)
-                                || st.login_btn.hit_test(cx, cy)
-                                || st.session_list.hit_test(cx, cy)
-                                || st.password_box.hit_test(cx, cy)
-                                || st.username_box.hit_test(cx, cy)
-                                || st.card.hit_test(cx, cy)
-                                || st.bg.hit_test(cx, cy);
+                            let hit_any = st.status_lbl.hit_test(cx, cy, &st.ui_context)
+                                || st.login_btn.hit_test(cx, cy, &st.ui_context)
+                                || st.session_list.hit_test(cx, cy, &st.ui_context)
+                                || st.password_box.hit_test(cx, cy, &st.ui_context)
+                                || st.username_box.hit_test(cx, cy, &st.ui_context)
+                                || st.card.hit_test(cx, cy, &st.ui_context)
+                                || st.bg.hit_test(cx, cy, &st.ui_context);
                             if hit_any {
+                                st.ui_context.clear_focus();
                                 st.bg.unfocus();
                                 st.card.unfocus();
                                 st.username_box.unfocus();
@@ -1038,53 +1079,60 @@ impl PointerHandler for AppState {
                         }
 
                         // Process the click on the topmost hit widget
-                        if st.status_lbl.hit_test(cx, cy) {
-                            if st.status_lbl.mouse_input(btn, ElementState::Pressed, cx, cy) {
+                        if st.status_lbl.hit_test(cx, cy, &st.ui_context) {
+                            if st.status_lbl.mouse_input(btn, ElementState::Pressed, cx, cy, &mut st.ui_context) {
                                 changed = true;
                             }
                             if btn == MouseButton::Left {
+                                st.ui_context.set_focused(&mut st.status_lbl);
                                 st.status_lbl.focus();
                             }
-                        } else if st.login_btn.hit_test(cx, cy) {
-                            if st.login_btn.mouse_input(btn, ElementState::Pressed, cx, cy) {
+                        } else if st.login_btn.hit_test(cx, cy, &st.ui_context) {
+                            if st.login_btn.mouse_input(btn, ElementState::Pressed, cx, cy, &mut st.ui_context) {
                                 changed = true;
                             }
                             if btn == MouseButton::Left {
+                                st.ui_context.set_focused(&mut st.login_btn);
                                 st.login_btn.focus();
                             }
-                        } else if st.session_list.hit_test(cx, cy) {
-                            if st.session_list.mouse_input(btn, ElementState::Pressed, cx, cy) {
+                        } else if st.session_list.hit_test(cx, cy, &st.ui_context) {
+                            if st.session_list.mouse_input(btn, ElementState::Pressed, cx, cy, &mut st.ui_context) {
                                 changed = true;
                             }
                             if btn == MouseButton::Left {
+                                st.ui_context.set_focused(&mut st.session_list);
                                 st.session_list.focus();
                             }
-                        } else if st.password_box.hit_test(cx, cy) {
-                            if st.password_box.mouse_input(btn, ElementState::Pressed, cx, cy) {
+                        } else if st.password_box.hit_test(cx, cy, &st.ui_context) {
+                            if st.password_box.mouse_input(btn, ElementState::Pressed, cx, cy, &mut st.ui_context) {
                                 changed = true;
                             }
                             if btn == MouseButton::Left {
+                                st.ui_context.set_focused(&mut st.password_box);
                                 st.password_box.focus();
                             }
-                        } else if st.username_box.hit_test(cx, cy) {
-                            if st.username_box.mouse_input(btn, ElementState::Pressed, cx, cy) {
+                        } else if st.username_box.hit_test(cx, cy, &st.ui_context) {
+                            if st.username_box.mouse_input(btn, ElementState::Pressed, cx, cy, &mut st.ui_context) {
                                 changed = true;
                             }
                             if btn == MouseButton::Left {
+                                st.ui_context.set_focused(&mut st.username_box);
                                 st.username_box.focus();
                             }
-                        } else if st.card.hit_test(cx, cy) {
-                            if st.card.mouse_input(btn, ElementState::Pressed, cx, cy) {
+                        } else if st.card.hit_test(cx, cy, &st.ui_context) {
+                            if st.card.mouse_input(btn, ElementState::Pressed, cx, cy, &mut st.ui_context) {
                                 changed = true;
                             }
                             if btn == MouseButton::Left {
+                                st.ui_context.set_focused(&mut st.card);
                                 st.card.focus();
                             }
-                        } else if st.bg.hit_test(cx, cy) {
-                            if st.bg.mouse_input(btn, ElementState::Pressed, cx, cy) {
+                        } else if st.bg.hit_test(cx, cy, &st.ui_context) {
+                            if st.bg.mouse_input(btn, ElementState::Pressed, cx, cy, &mut st.ui_context) {
                                 changed = true;
                             }
                             if btn == MouseButton::Left {
+                                st.ui_context.set_focused(&mut st.bg);
                                 st.bg.focus();
                             }
                         }
@@ -1109,10 +1157,8 @@ impl PointerHandler for AppState {
                         let cx = st.cursor_x;
                         let cy = st.cursor_y;
                         let mut changed = false;
-                        for w in st.widgets_iter_mut() {
-                            if w.mouse_input(btn, ElementState::Released, cx, cy) {
-                                changed = true;
-                            }
+                        if st.widgets_mouse_input(btn, ElementState::Released, cx, cy) {
+                            changed = true;
                         }
                         if btn == MouseButton::Left {
                             // Handle login click
@@ -1158,13 +1204,13 @@ impl AppState {
 
         // Check for Ctrl+C to abort/exit back to TTY
         if self.ctrl_pressed && (keysym == xkeysym::Keysym::c || keysym == xkeysym::Keysym::C) {
-            eprintln!("[clear-display-manager] Ctrl+C pressed. Aborting greeter.");
+            eprintln!("[cce-display-manager] Ctrl+C pressed. Aborting greeter.");
             std::process::exit(130);
         }
 
         // Check for F5 to request daemon restart
         if keysym == xkeysym::Keysym::F5 {
-            eprintln!("[clear-display-manager] F5 pressed. Requesting daemon restart.");
+            eprintln!("[cce-display-manager] F5 pressed. Requesting daemon restart.");
             std::process::exit(135);
         }
 
@@ -1253,18 +1299,20 @@ impl AppState {
                     st.session_list.hovered_idx = None;
                     changed = true;
                 } else if logical_key == Key::Named(NamedKey::Tab) {
-                    let is_user_focused = clear_ui::widget::focus::is_focused(&st.username_box);
+                    let is_user_focused = st.username_box.focused(&st.ui_context);
                     if is_user_focused {
+                        st.ui_context.set_focused(&mut st.password_box);
                         st.username_box.unfocus();
                         st.password_box.focus();
                     } else {
+                        st.ui_context.set_focused(&mut st.username_box);
                         st.password_box.unfocus();
                         st.username_box.focus();
                     }
                     changed = true;
-                } else if logical_key == Key::Named(NamedKey::Enter) && clear_ui::widget::focus::is_focused(&st.password_box) {
+                } else if logical_key == Key::Named(NamedKey::Enter) && st.password_box.focused(&st.ui_context) {
                     // Process Enter in the password box to commit the buffer
-                    st.password_box.keyboard_input(&custom_event);
+                    st.password_box.keyboard_input(&custom_event, &mut st.ui_context);
 
                     // Extract login username and password
                     let username = st.username_box.text.trim().to_string();
@@ -1273,10 +1321,12 @@ impl AppState {
                     if username.is_empty() {
                         st.status_lbl.text = "Username cannot be empty".to_string();
                         st.status_lbl.is_error = true;
+                        st.ui_context.set_focused(&mut st.username_box);
                         st.username_box.focus();
                     } else if password.is_empty() {
                         st.status_lbl.text = "Password cannot be empty".to_string();
                         st.status_lbl.is_error = true;
+                        st.ui_context.set_focused(&mut st.password_box);
                         st.password_box.focus();
                     } else {
                         self.auth_request_id += 1;
@@ -1287,17 +1337,16 @@ impl AppState {
                         authenticate_user(self.auth_request_id, username, password, self.auth_sender.clone());
                     }
                     changed = true;
-                } else if logical_key == Key::Named(NamedKey::Enter) && clear_ui::widget::focus::is_focused(&st.username_box) {
+                } else if logical_key == Key::Named(NamedKey::Enter) && st.username_box.focused(&st.ui_context) {
                     // Pressing enter in the username box commits and shifts focus to the password box
-                    st.username_box.keyboard_input(&custom_event);
+                    st.username_box.keyboard_input(&custom_event, &mut st.ui_context);
+                    st.ui_context.set_focused(&mut st.password_box);
                     st.username_box.unfocus();
                     st.password_box.focus();
                     changed = true;
                 } else {
-                    for w in st.widgets_iter_mut() {
-                        if w.keyboard_input(&custom_event) {
-                            changed = true;
-                        }
+                    if st.widgets_keyboard_input(&custom_event) {
+                        changed = true;
                     }
                 }
 
@@ -1427,7 +1476,7 @@ struct SystemConfig {
 }
 
 fn load_system_config() -> SystemConfig {
-    let path = "/etc/clear.toml";
+    let path = "/etc/cce.toml";
     if std::path::Path::new(path).exists() {
         if let Ok(content) = std::fs::read_to_string(path) {
             if let Ok(config) = toml::from_str(&content) {
@@ -1481,11 +1530,11 @@ fn run_greeter() {
     event_queue.roundtrip(&mut app).unwrap();
 
     let sys_config = load_system_config();
-    eprintln!("[clear-display-manager] Loaded system config: {:?}", sys_config);
+    eprintln!("[cce-display-manager] Loaded system config: {:?}", sys_config);
     let compositor_scale = clear_ui::wayland::detect_scale_factor(&app.output_state);
-    eprintln!("[clear-display-manager] Detected compositor scale factor from Wayland: {}", compositor_scale);
+    eprintln!("[cce-display-manager] Detected compositor scale factor from Wayland: {}", compositor_scale);
     let layout_scale = sys_config.scale.unwrap_or(compositor_scale);
-    eprintln!("[clear-display-manager] Final resolved layout scale factor: {}", layout_scale);
+    eprintln!("[cce-display-manager] Final resolved layout scale factor: {}", layout_scale);
     let surface = app.compositor_state.create_surface(&qh);
     surface.set_buffer_scale(compositor_scale as i32);
 
@@ -1494,7 +1543,7 @@ fn run_greeter() {
 
     let window = app.xdg_shell_state.create_window(surface.clone(), WindowDecorations::None, &qh);
     window.set_title("Clear Display Manager");
-    window.set_app_id("clear-display-manager");
+    window.set_app_id("cce-display-manager");
     window.set_min_size(Some((pw, ph)));
     window.commit();
 
@@ -1518,7 +1567,7 @@ fn run_greeter() {
         // Start background fingerprint/empty-password authentication if username is prepopulated and fprintd is enabled!
         let username = st.username_box.text.trim().to_string();
         if !username.is_empty() {
-            let has_fprint = std::fs::read_to_string("/etc/pam.d/clear-display-manager")
+            let has_fprint = std::fs::read_to_string("/etc/pam.d/cce-display-manager")
                 .map(|content| {
                     content.lines().any(|line| {
                         let trimmed = line.trim();
@@ -1789,8 +1838,8 @@ fn run_daemon() {
     use users::os::unix::UserExt;
     let uid = users::get_current_uid();
     if uid != 0 {
-        eprintln!("[clear-display-manager] Error: Daemon mode must be run as root (UID 0). Effective UID: {}", uid);
-        eprintln!("[clear-display-manager] For local development/testing, run with: cargo run -- --greeter");
+        eprintln!("[cce-display-manager] Error: Daemon mode must be run as root (UID 0). Effective UID: {}", uid);
+        eprintln!("[cce-display-manager] For local development/testing, run with: cargo run -- --greeter");
         std::process::exit(1);
     }
 
@@ -1802,7 +1851,7 @@ fn run_daemon() {
     let tty_name = if is_real_tty { raw_tty } else { "tty1".to_string() };
 
     // Redirect stdout and stderr of the daemon to a log file
-    let log_path = format!("/tmp/clear-display-manager-daemon-{}.log", tty_name);
+    let log_path = format!("/tmp/cce-display-manager-daemon-{}.log", tty_name);
     if let Ok(log_file) = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -1817,9 +1866,9 @@ fn run_daemon() {
         }
     }
 
-    println!("[clear-display-manager] Starting display manager daemon on {}...", tty_name);
+    println!("[cce-display-manager] Starting display manager daemon on {}...", tty_name);
 
-    let runtime_dir = format!("/run/clear-display-manager-{}", tty_name);
+    let runtime_dir = format!("/run/cce-display-manager-{}", tty_name);
     if !std::path::Path::new(&runtime_dir).exists() {
         std::fs::create_dir_all(&runtime_dir).expect("failed to create runtime dir");
         use std::os::unix::fs::PermissionsExt;
@@ -1838,10 +1887,10 @@ fn run_daemon() {
                 let mut perms = metadata.permissions();
                 let mode = perms.mode();
                 if (mode & 0o4000) == 0 {
-                    println!("[clear-display-manager] Restoring SUID root permissions to {} (current mode: {:o})", path, mode);
+                    println!("[cce-display-manager] Restoring SUID root permissions to {} (current mode: {:o})", path, mode);
                     perms.set_mode(mode | 0o4000 | 0o0111);
                     if let Err(e) = std::fs::set_permissions(path, perms) {
-                        eprintln!("[clear-display-manager] Failed to set permissions on {}: {}", path, e);
+                        eprintln!("[cce-display-manager] Failed to set permissions on {}: {}", path, e);
                     }
                 }
             }
@@ -1850,12 +1899,12 @@ fn run_daemon() {
 
     loop {
         if is_real_tty {
-            println!("[clear-display-manager] Waiting for {} to become the active TTY...", tty_name);
+            println!("[cce-display-manager] Waiting for {} to become the active TTY...", tty_name);
             loop {
                 if let Ok(active_tty) = std::fs::read_to_string("/sys/class/tty/tty0/active") {
                     let active_tty = active_tty.trim();
                     if active_tty == tty_name {
-                        println!("[clear-display-manager] {} is now active. Spawning greeter.", tty_name);
+                        println!("[cce-display-manager] {} is now active. Spawning greeter.", tty_name);
                         break;
                     }
                 }
@@ -1863,11 +1912,11 @@ fn run_daemon() {
             }
         }
 
-        println!("[clear-display-manager] Spawning greeter session via cage...");
+        println!("[cce-display-manager] Spawning greeter session via cage...");
  
-        let mut exe_path = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/clear-display-manager"));
+        let mut exe_path = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/cce-display-manager"));
         if !exe_path.exists() {
-            exe_path = std::path::PathBuf::from("/usr/bin/clear-display-manager");
+            exe_path = std::path::PathBuf::from("/usr/bin/cce-display-manager");
         }
 
         let mut child = std::process::Command::new("cage")
@@ -1907,25 +1956,25 @@ fn run_daemon() {
         }
 
         let status = child.wait().expect("failed to wait on child process");
-        println!("[clear-display-manager] Greeter session exited with status: {}", status);
+        println!("[cce-display-manager] Greeter session exited with status: {}", status);
 
         if status.code() == Some(130) {
-            println!("[clear-display-manager] Abort requested via Ctrl+C. Exiting display manager daemon.");
+            println!("[cce-display-manager] Abort requested via Ctrl+C. Exiting display manager daemon.");
             std::process::exit(0);
         }
 
         if status.code() == Some(135) {
-            println!("[clear-display-manager] Restart requested via F5. Re-executing daemon...");
-            let mut exe_path = std::path::PathBuf::from("/usr/bin/clear-display-manager");
+            println!("[cce-display-manager] Restart requested via F5. Re-executing daemon...");
+            let mut exe_path = std::path::PathBuf::from("/usr/bin/cce-display-manager");
             if !exe_path.exists() {
-                exe_path = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/clear-display-manager"));
+                exe_path = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/cce-display-manager"));
             }
             let args: Vec<String> = std::env::args().collect();
             use std::os::unix::process::CommandExt;
             let mut cmd = std::process::Command::new(&exe_path);
             cmd.args(&args[1..]);
             let err = cmd.exec();
-            eprintln!("[clear-display-manager] Failed to re-exec daemon: {:?}", err);
+            eprintln!("[cce-display-manager] Failed to re-exec daemon: {:?}", err);
         }
 
         if auth_success.is_none() {
@@ -1935,30 +1984,30 @@ fn run_daemon() {
 
         if let Some((username, exec, is_wayland, password)) = auth_success {
             // Write last logged-in user and session to persistent files
-            let var_lib = "/var/lib/clear-display-manager";
+            let var_lib = "/var/lib/cce-display-manager";
             if let Err(e) = std::fs::create_dir_all(var_lib) {
-                eprintln!("[clear-display-manager] Failed to create var lib dir: {:?}", e);
+                eprintln!("[cce-display-manager] Failed to create var lib dir: {:?}", e);
             } else {
                 if let Err(e) = std::fs::write(format!("{}/last_user", var_lib), &username) {
-                    eprintln!("[clear-display-manager] Failed to write last_user file: {:?}", e);
+                    eprintln!("[cce-display-manager] Failed to write last_user file: {:?}", e);
                 }
                 if let Err(e) = std::fs::write(format!("{}/last_session", var_lib), &exec) {
-                    eprintln!("[clear-display-manager] Failed to write last_session file: {:?}", e);
+                    eprintln!("[cce-display-manager] Failed to write last_session file: {:?}", e);
                 }
             }
 
-            println!("[clear-display-manager] Launching user session Exec: '{}' (Wayland: {}) for user: '{}'", exec, is_wayland, username);
+            println!("[cce-display-manager] Launching user session Exec: '{}' (Wayland: {}) for user: '{}'", exec, is_wayland, username);
             
             let pid = unsafe { libc::fork() };
             if pid < 0 {
-                eprintln!("[clear-display-manager] Fork failed: {}", std::io::Error::last_os_error());
+                eprintln!("[cce-display-manager] Fork failed: {}", std::io::Error::last_os_error());
                 continue;
             } else if pid == 0 {
                 // Child process: execute PAM session and spawn the compositor/user session
                 let service = if password.is_empty() {
-                    "clear-display-manager-autologin"
+                    "cce-display-manager-autologin"
                 } else {
-                    "clear-display-manager"
+                    "cce-display-manager"
                 };
                 let mut auth = match PamSession::new(service, &username, &password, 0, None) {
                     Ok(a) => a,
@@ -1971,7 +2020,7 @@ fn run_daemon() {
                         match PamSession::new(fallback_service, &username, &password, 0, None) {
                             Ok(a) => a,
                             Err(e) => {
-                                eprintln!("[clear-display-manager] PAM Init Error in child: {:?}", e);
+                                eprintln!("[cce-display-manager] PAM Init Error in child: {:?}", e);
                                 std::process::exit(1);
                             }
                         }
@@ -1987,20 +2036,20 @@ fn run_daemon() {
                 let _ = auth.putenv("XDG_SESSION_CLASS=user");
 
                 if let Err(e) = auth.authenticate() {
-                    eprintln!("[clear-display-manager] PAM Authentication failed in child: {:?}", e);
+                    eprintln!("[cce-display-manager] PAM Authentication failed in child: {:?}", e);
                     std::process::exit(1);
                 }
 
                 if let Err(e) = auth.open_session() {
-                    eprintln!("[clear-display-manager] PAM Session failed in child: {:?}", e);
+                    eprintln!("[cce-display-manager] PAM Session failed in child: {:?}", e);
                     std::process::exit(1);
                 }
 
                 let pam_env = auth.get_env();
-                println!("[clear-display-manager] PAM Environment variables: {:?}", pam_env);
+                println!("[cce-display-manager] PAM Environment variables: {:?}", pam_env);
 
                 if let Some((_, session_id)) = pam_env.iter().find(|(k, _)| k == "XDG_SESSION_ID") {
-                    println!("[clear-display-manager] Explicitly activating logind session {} via loginctl...", session_id);
+                    println!("[cce-display-manager] Explicitly activating logind session {} via loginctl...", session_id);
                     let _ = std::process::Command::new("loginctl")
                         .arg("activate")
                         .arg(session_id)
@@ -2010,7 +2059,7 @@ fn run_daemon() {
                 let user = match users::get_user_by_name(&username) {
                     Some(u) => u,
                     None => {
-                        eprintln!("[clear-display-manager] Error: User '{}' not found in system.", username);
+                        eprintln!("[cce-display-manager] Error: User '{}' not found in system.", username);
                         std::process::exit(1);
                     }
                 };
@@ -2035,11 +2084,11 @@ fn run_daemon() {
                 };
 
                 if cmd_bin.is_empty() {
-                    eprintln!("[clear-display-manager] Error: Resolved execution command is empty.");
+                    eprintln!("[cce-display-manager] Error: Resolved execution command is empty.");
                     std::process::exit(1);
                 }
 
-                println!("[clear-display-manager] Spawning session: {} with args {:?} for UID={}, GID={}", cmd_bin, cmd_args, user_uid, user_gid);
+                println!("[cce-display-manager] Spawning session: {} with args {:?} for UID={}, GID={}", cmd_bin, cmd_args, user_uid, user_gid);
 
                 use std::os::unix::process::CommandExt;
                 let mut session_cmd = std::process::Command::new(&cmd_bin);
@@ -2085,10 +2134,10 @@ fn run_daemon() {
                         let _ = child_proc.wait();
                     }
                     Err(e) => {
-                        eprintln!("[clear-display-manager] Failed to launch session: {}", e);
+                        eprintln!("[cce-display-manager] Failed to launch session: {}", e);
                     }
                 }
-                println!("[clear-display-manager] User session ended.");
+                println!("[cce-display-manager] User session ended.");
                 std::mem::drop(auth);
                 std::process::exit(0);
             } else {
@@ -2097,10 +2146,10 @@ fn run_daemon() {
                 unsafe {
                     libc::waitpid(pid, &mut status, 0);
                 }
-                println!("[clear-display-manager] Session worker child (PID {}) exited with status: {}", pid, status);
+                println!("[cce-display-manager] Session worker child (PID {}) exited with status: {}", pid, status);
 
                 if let Some(vt) = tty_name.strip_prefix("tty").and_then(|s| s.parse::<u32>().ok()) {
-                    println!("[clear-display-manager] Switching back to VT {}...", vt);
+                    println!("[cce-display-manager] Switching back to VT {}...", vt);
                     let _ = std::process::Command::new("chvt")
                         .arg(vt.to_string())
                         .status();
