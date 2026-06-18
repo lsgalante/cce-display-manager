@@ -31,10 +31,10 @@ use wayland_client::{
 use calloop::{EventLoop, channel};
 use calloop_wayland_source::WaylandSource;
 
-use clear_ui::widget::{
+use cce_ui::widget::{
     Button, ContentBg, TextLabel, Element, ElementState, MouseButton, Key, NamedKey, KeyEvent, TextBox
 };
-use clear_ui::context::UiContext;
+use cce_ui::context::UiContext;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -402,7 +402,7 @@ struct State {
     login_btn: Button,
     status_lbl: StatusLabel,
     session_list: SessionList,
-    ui_context: clear_ui::context::UiContext,
+    ui_context: cce_ui::context::UiContext,
 
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -429,7 +429,7 @@ struct State {
 
 impl State {
     async fn new(
-        wayland_handle: &'static clear_ui::wayland::WaylandSurfaceHandle,
+        wayland_handle: &'static cce_ui::wayland::WaylandSurfaceHandle,
         pw: u32, ph: u32,
         scale: f64,
         compositor_scale: f64,
@@ -463,7 +463,7 @@ impl State {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(clear_ui::SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(cce_ui::SHADER.into()),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -579,7 +579,7 @@ impl State {
             login_btn,
             status_lbl,
             session_list,
-            ui_context: clear_ui::context::UiContext::new(),
+            ui_context: cce_ui::context::UiContext::new(),
             font_system,
             swash_cache,
             text_atlas,
@@ -1531,7 +1531,7 @@ fn run_greeter() {
 
     let sys_config = load_system_config();
     eprintln!("[cce-display-manager] Loaded system config: {:?}", sys_config);
-    let compositor_scale = clear_ui::wayland::detect_scale_factor(&app.output_state);
+    let compositor_scale = cce_ui::wayland::detect_scale_factor(&app.output_state);
     eprintln!("[cce-display-manager] Detected compositor scale factor from Wayland: {}", compositor_scale);
     let layout_scale = sys_config.scale.unwrap_or(compositor_scale);
     eprintln!("[cce-display-manager] Final resolved layout scale factor: {}", layout_scale);
@@ -1547,7 +1547,7 @@ fn run_greeter() {
     window.set_min_size(Some((pw, ph)));
     window.commit();
 
-    let wayland_handle = Box::leak(Box::new(clear_ui::wayland::WaylandSurfaceHandle {
+    let wayland_handle = Box::leak(Box::new(cce_ui::wayland::WaylandSurfaceHandle {
         display_ptr: conn.backend().display_id().as_ptr() as *mut std::ffi::c_void,
         surface_ptr: surface.id().as_ptr() as *mut std::ffi::c_void,
     }));
