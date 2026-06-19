@@ -615,6 +615,7 @@ impl State {
         ]
     }
 
+    #[allow(dead_code)]
     fn widgets_iter_mut(&mut self) -> Vec<&mut dyn Element> {
         vec![
             &mut self.bg,
