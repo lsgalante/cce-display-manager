@@ -772,7 +772,7 @@ impl State {
             }
             Err(wgpu::SurfaceError::Timeout) => return,
             Err(e) => {
-                eprintln!("Surface error: {e:?}");
+                log::error!("Surface error: {:?}", e);
                 return;
             }
         };
@@ -1205,13 +1205,13 @@ impl AppState {
 
         // Check for Ctrl+C to abort/exit back to TTY
         if self.ctrl_pressed && (keysym == xkeysym::Keysym::c || keysym == xkeysym::Keysym::C) {
-            eprintln!("[cce-display-manager] Ctrl+C pressed. Aborting greeter.");
+            log::error!("Ctrl+C pressed. Aborting greeter.");
             std::process::exit(130);
         }
 
         // Check for F5 to request daemon restart
         if keysym == xkeysym::Keysym::F5 {
-            eprintln!("[cce-display-manager] F5 pressed. Requesting daemon restart.");
+            log::info!("F5 pressed. Requesting daemon restart.");
             std::process::exit(135);
         }
 
@@ -1531,11 +1531,11 @@ fn run_greeter() {
     event_queue.roundtrip(&mut app).unwrap();
 
     let sys_config = load_system_config();
-    eprintln!("[cce-display-manager] Loaded system config: {:?}", sys_config);
+    log::info!("Loaded system config: {:?}", sys_config);
     let compositor_scale = cce_ui::wayland::detect_scale_factor(&app.output_state);
-    eprintln!("[cce-display-manager] Detected compositor scale factor from Wayland: {}", compositor_scale);
+    log::info!("Detected compositor scale factor from Wayland: {}", compositor_scale);
     let layout_scale = sys_config.scale.unwrap_or(compositor_scale);
-    eprintln!("[cce-display-manager] Final resolved layout scale factor: {}", layout_scale);
+    log::info!("Final resolved layout scale factor: {}", layout_scale);
     let surface = app.compositor_state.create_surface(&qh);
     surface.set_buffer_scale(compositor_scale as i32);
 
@@ -1839,8 +1839,8 @@ fn run_daemon() {
     use users::os::unix::UserExt;
     let uid = users::get_current_uid();
     if uid != 0 {
-        eprintln!("[cce-display-manager] Error: Daemon mode must be run as root (UID 0). Effective UID: {}", uid);
-        eprintln!("[cce-display-manager] For local development/testing, run with: cargo run -- --greeter");
+        log::error!("Error: Daemon mode must be run as root (UID 0). Effective UID: {}", uid);
+        log::info!("For local development/testing, run with: cargo run -- --greeter");
         std::process::exit(1);
     }
 
@@ -1867,7 +1867,7 @@ fn run_daemon() {
         }
     }
 
-    println!("[cce-display-manager] Starting display manager daemon on {}...", tty_name);
+    log::info!("Starting display manager daemon on {}...", tty_name);
 
     let runtime_dir = format!("/run/cce-display-manager-{}", tty_name);
     if !std::path::Path::new(&runtime_dir).exists() {
@@ -1888,10 +1888,10 @@ fn run_daemon() {
                 let mut perms = metadata.permissions();
                 let mode = perms.mode();
                 if (mode & 0o4000) == 0 {
-                    println!("[cce-display-manager] Restoring SUID root permissions to {} (current mode: {:o})", path, mode);
+                    log::info!("Restoring SUID root permissions to {} (current mode: {:o})", path, mode);
                     perms.set_mode(mode | 0o4000 | 0o0111);
                     if let Err(e) = std::fs::set_permissions(path, perms) {
-                        eprintln!("[cce-display-manager] Failed to set permissions on {}: {}", path, e);
+                        log::error!("Failed to set permissions on {}: {}", path, e);
                     }
                 }
             }
@@ -1900,12 +1900,12 @@ fn run_daemon() {
 
     loop {
         if is_real_tty {
-            println!("[cce-display-manager] Waiting for {} to become the active TTY...", tty_name);
+            log::info!("Waiting for {} to become the active TTY...", tty_name);
             loop {
                 if let Ok(active_tty) = std::fs::read_to_string("/sys/class/tty/tty0/active") {
                     let active_tty = active_tty.trim();
                     if active_tty == tty_name {
-                        println!("[cce-display-manager] {} is now active. Spawning greeter.", tty_name);
+                        log::info!("{} is now active. Spawning greeter.", tty_name);
                         break;
                     }
                 }
@@ -1913,7 +1913,7 @@ fn run_daemon() {
             }
         }
 
-        println!("[cce-display-manager] Spawning greeter session via cage...");
+        log::info!("Spawning greeter session via cage...");
  
         let mut exe_path = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/cce-display-manager"));
         if !exe_path.exists() {
@@ -1947,25 +1947,25 @@ fn run_daemon() {
                         let exec = parts[2].to_string();
                         let is_wayland = parts[3].parse::<bool>().unwrap_or(true);
                         let password = parts[4].to_string();
-                        println!("[greeter-stdout] AUTH_SUCCESS|{}|{}|{}", username, exec, is_wayland);
+                        log::info!("[greeter-stdout] AUTH_SUCCESS|{}|{}|{}", username, exec, is_wayland);
                         auth_success = Some((username, exec, is_wayland, password));
                     }
                 } else {
-                    println!("[greeter-stdout] {}", line_str);
+                    log::info!("[greeter-stdout] {}", line_str);
                 }
             }
         }
 
         let status = child.wait().expect("failed to wait on child process");
-        println!("[cce-display-manager] Greeter session exited with status: {}", status);
+        log::info!("Greeter session exited with status: {}", status);
 
         if status.code() == Some(130) {
-            println!("[cce-display-manager] Abort requested via Ctrl+C. Exiting display manager daemon.");
+            log::info!("Abort requested via Ctrl+C. Exiting display manager daemon.");
             std::process::exit(0);
         }
 
         if status.code() == Some(135) {
-            println!("[cce-display-manager] Restart requested via F5. Re-executing daemon...");
+            log::info!("Restart requested via F5. Re-executing daemon...");
             let mut exe_path = std::path::PathBuf::from("/usr/bin/cce-display-manager");
             if !exe_path.exists() {
                 exe_path = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/cce-display-manager"));
@@ -1975,7 +1975,7 @@ fn run_daemon() {
             let mut cmd = std::process::Command::new(&exe_path);
             cmd.args(&args[1..]);
             let err = cmd.exec();
-            eprintln!("[cce-display-manager] Failed to re-exec daemon: {:?}", err);
+            log::error!("Failed to re-exec daemon: {:?}", err);
         }
 
         if auth_success.is_none() {
@@ -1987,21 +1987,21 @@ fn run_daemon() {
             // Write last logged-in user and session to persistent files
             let var_lib = "/var/lib/cce-display-manager";
             if let Err(e) = std::fs::create_dir_all(var_lib) {
-                eprintln!("[cce-display-manager] Failed to create var lib dir: {:?}", e);
+                log::error!("Failed to create var lib dir: {:?}", e);
             } else {
                 if let Err(e) = std::fs::write(format!("{}/last_user", var_lib), &username) {
-                    eprintln!("[cce-display-manager] Failed to write last_user file: {:?}", e);
+                    log::error!("Failed to write last_user file: {:?}", e);
                 }
                 if let Err(e) = std::fs::write(format!("{}/last_session", var_lib), &exec) {
-                    eprintln!("[cce-display-manager] Failed to write last_session file: {:?}", e);
+                    log::error!("Failed to write last_session file: {:?}", e);
                 }
             }
 
-            println!("[cce-display-manager] Launching user session Exec: '{}' (Wayland: {}) for user: '{}'", exec, is_wayland, username);
+            log::info!("Launching user session Exec: '{}' (Wayland: {}) for user: '{}'", exec, is_wayland, username);
             
             let pid = unsafe { libc::fork() };
             if pid < 0 {
-                eprintln!("[cce-display-manager] Fork failed: {}", std::io::Error::last_os_error());
+                log::error!("Fork failed: {}", std::io::Error::last_os_error());
                 continue;
             } else if pid == 0 {
                 // Child process: execute PAM session and spawn the compositor/user session
@@ -2021,7 +2021,7 @@ fn run_daemon() {
                         match PamSession::new(fallback_service, &username, &password, 0, None) {
                             Ok(a) => a,
                             Err(e) => {
-                                eprintln!("[cce-display-manager] PAM Init Error in child: {:?}", e);
+                                log::error!("PAM Init Error in child: {:?}", e);
                                 std::process::exit(1);
                             }
                         }
@@ -2037,20 +2037,20 @@ fn run_daemon() {
                 let _ = auth.putenv("XDG_SESSION_CLASS=user");
 
                 if let Err(e) = auth.authenticate() {
-                    eprintln!("[cce-display-manager] PAM Authentication failed in child: {:?}", e);
+                    log::error!("PAM Authentication failed in child: {:?}", e);
                     std::process::exit(1);
                 }
 
                 if let Err(e) = auth.open_session() {
-                    eprintln!("[cce-display-manager] PAM Session failed in child: {:?}", e);
+                    log::error!("PAM Session failed in child: {:?}", e);
                     std::process::exit(1);
                 }
 
                 let pam_env = auth.get_env();
-                println!("[cce-display-manager] PAM Environment variables: {:?}", pam_env);
+                log::info!("PAM Environment variables: {:?}", pam_env);
 
                 if let Some((_, session_id)) = pam_env.iter().find(|(k, _)| k == "XDG_SESSION_ID") {
-                    println!("[cce-display-manager] Explicitly activating logind session {} via loginctl...", session_id);
+                    log::info!("Explicitly activating logind session {} via loginctl...", session_id);
                     let _ = std::process::Command::new("loginctl")
                         .arg("activate")
                         .arg(session_id)
@@ -2060,7 +2060,7 @@ fn run_daemon() {
                 let user = match users::get_user_by_name(&username) {
                     Some(u) => u,
                     None => {
-                        eprintln!("[cce-display-manager] Error: User '{}' not found in system.", username);
+                        log::error!("Error: User '{}' not found in system.", username);
                         std::process::exit(1);
                     }
                 };
@@ -2085,11 +2085,11 @@ fn run_daemon() {
                 };
 
                 if cmd_bin.is_empty() {
-                    eprintln!("[cce-display-manager] Error: Resolved execution command is empty.");
+                    log::error!("Error: Resolved execution command is empty.");
                     std::process::exit(1);
                 }
 
-                println!("[cce-display-manager] Spawning session: {} with args {:?} for UID={}, GID={}", cmd_bin, cmd_args, user_uid, user_gid);
+                log::info!("Spawning session: {} with args {:?} for UID={}, GID={}", cmd_bin, cmd_args, user_uid, user_gid);
 
                 use std::os::unix::process::CommandExt;
                 let mut session_cmd = std::process::Command::new(&cmd_bin);
@@ -2135,10 +2135,10 @@ fn run_daemon() {
                         let _ = child_proc.wait();
                     }
                     Err(e) => {
-                        eprintln!("[cce-display-manager] Failed to launch session: {}", e);
+                        log::error!("Failed to launch session: {}", e);
                     }
                 }
-                println!("[cce-display-manager] User session ended.");
+                log::info!("User session ended.");
                 std::mem::drop(auth);
                 std::process::exit(0);
             } else {
@@ -2147,10 +2147,10 @@ fn run_daemon() {
                 unsafe {
                     libc::waitpid(pid, &mut status, 0);
                 }
-                println!("[cce-display-manager] Session worker child (PID {}) exited with status: {}", pid, status);
+                log::info!("Session worker child (PID {}) exited with status: {}", pid, status);
 
                 if let Some(vt) = tty_name.strip_prefix("tty").and_then(|s| s.parse::<u32>().ok()) {
-                    println!("[cce-display-manager] Switching back to VT {}...", vt);
+                    log::info!("Switching back to VT {}...", vt);
                     let _ = std::process::Command::new("chvt")
                         .arg(vt.to_string())
                         .status();
@@ -2161,6 +2161,7 @@ fn run_daemon() {
 }
 
 fn main() {
+    env_logger::init();
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 && args[1] == "--greeter" {
         run_greeter();
