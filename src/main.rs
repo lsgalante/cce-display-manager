@@ -32,7 +32,8 @@ use calloop::{EventLoop, channel};
 use calloop_wayland_source::WaylandSource;
 
 use cce_ui::widget::{
-    Button, ContentBg, TextLabel, Element, ElementState, MouseButton, Key, NamedKey, KeyEvent, TextBox
+    Button, ContentBg, TextLabel, Element, ElementState, MouseButton, Key, NamedKey, KeyEvent, TextBox,
+    Widget, Container, focus
 };
 use cce_ui::context::UiContext;
 
@@ -167,47 +168,53 @@ fn discover_sessions() -> Vec<Session> {
 // ── Custom LoginCard Container Element ──
 #[derive(Debug, Clone)]
 struct LoginCard {
-    x: f32, y: f32, w: f32, h: f32,
+    base: Widget,
 }
 
 impl LoginCard {
     fn new() -> Self {
-        Self { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }
+        Self { base: Widget::new() }
     }
 }
 
 impl Element for LoginCard {
-    fn rect(&self) -> (f32, f32, f32, f32) { (self.x, self.y, self.w, self.h) }
-    fn set_rect(&mut self, x: f32, y: f32, w: f32, h: f32) { self.x = x; self.y = y; self.w = w; self.h = h; }
+    fn base(&self) -> Option<&Widget> { Some(&self.base) }
+    fn base_mut(&mut self) -> Option<&mut Widget> { Some(&mut self.base) }
+    fn as_ptr(&self) -> *mut (dyn Element + 'static) {
+        self as *const Self as *mut Self as *mut (dyn Element + 'static)
+    }
+    fn as_ptr_mut(&mut self) -> *mut (dyn Element + 'static) {
+        self as *mut Self as *mut (dyn Element + 'static)
+    }
     fn color(&self) -> [f32; 4] { [0.07, 0.07, 0.10, 0.90] } // Sleek dark card background
 
     fn extra_quads(&self) -> Vec<(f32, f32, f32, f32, [f32; 4])> {
         let border_color = [0.20, 0.40, 0.65, 0.6]; // Premium blue border accent
         vec![
             // Top border
-            (self.x, self.y, self.w, 1.5, border_color),
+            (self.base.x, self.base.y, self.base.w, 1.5, border_color),
             // Bottom border
-            (self.x, self.y + self.h - 1.5, self.w, 1.5, border_color),
+            (self.base.x, self.base.y + self.base.h - 1.5, self.base.w, 1.5, border_color),
             // Left border
-            (self.x, self.y, 1.5, self.h, border_color),
+            (self.base.x, self.base.y, 1.5, self.base.h, border_color),
             // Right border
-            (self.x + self.w - 1.5, self.y, 1.5, self.h, border_color),
+            (self.base.x + self.base.w - 1.5, self.base.y, 1.5, self.base.h, border_color),
         ]
     }
 
     fn text_labels(&self) -> Vec<TextLabel> {
         vec![
             TextLabel {
-                text: "CLEAR DISPLAY MANAGER".to_string(),
-                x: self.x + 30.0,
-                y: self.y + 30.0,
+                text: "CCE DISPLAY MANAGER".to_string(),
+                x: self.base.x + 30.0,
+                y: self.base.y + 30.0,
                 font_size: 15.0,
                 color: [0xee, 0xee, 0xf5],
             },
             TextLabel {
                 text: "Authenticate to begin your session".to_string(),
-                x: self.x + 30.0,
-                y: self.y + 50.0,
+                x: self.base.x + 30.0,
+                y: self.base.y + 50.0,
                 font_size: 11.0,
                 color: [0x83, 0x83, 0x8a],
             },
@@ -215,23 +222,28 @@ impl Element for LoginCard {
     }
 }
 
-// ── Custom Status Message Indicator ──
 #[derive(Debug, Clone)]
 struct StatusLabel {
-    x: f32, y: f32, w: f32, h: f32,
+    base: Widget,
     pub text: String,
     pub is_error: bool,
 }
 
 impl StatusLabel {
     fn new(text: String) -> Self {
-        Self { x: 0.0, y: 0.0, w: 0.0, h: 0.0, text, is_error: false }
+        Self { base: Widget::new(), text, is_error: false }
     }
 }
 
 impl Element for StatusLabel {
-    fn rect(&self) -> (f32, f32, f32, f32) { (self.x, self.y, self.w, self.h) }
-    fn set_rect(&mut self, x: f32, y: f32, w: f32, h: f32) { self.x = x; self.y = y; self.w = w; self.h = h; }
+    fn base(&self) -> Option<&Widget> { Some(&self.base) }
+    fn base_mut(&mut self) -> Option<&mut Widget> { Some(&mut self.base) }
+    fn as_ptr(&self) -> *mut (dyn Element + 'static) {
+        self as *const Self as *mut Self as *mut (dyn Element + 'static)
+    }
+    fn as_ptr_mut(&mut self) -> *mut (dyn Element + 'static) {
+        self as *mut Self as *mut (dyn Element + 'static)
+    }
     fn color(&self) -> [f32; 4] { [0.0, 0.0, 0.0, 0.0] } // Transparent background
 
     fn text_labels(&self) -> Vec<TextLabel> {
@@ -242,18 +254,17 @@ impl Element for StatusLabel {
         };
         vec![TextLabel {
             text: self.text.clone(),
-            x: self.x,
-            y: self.y,
+            x: self.base.x,
+            y: self.base.y,
             font_size: 11.0,
             color: col,
         }]
     }
 }
 
-// ── Custom Session List Panel Element ──
 #[derive(Debug, Clone)]
 struct SessionList {
-    x: f32, y: f32, w: f32, h: f32,
+    base: Widget,
     sessions: Vec<Session>,
     selected_idx: usize,
     hovered_idx: Option<usize>,
@@ -262,7 +273,7 @@ struct SessionList {
 impl SessionList {
     fn new(sessions: Vec<Session>) -> Self {
         Self {
-            x: 0.0, y: 0.0, w: 0.0, h: 0.0,
+            base: Widget::new(),
             sessions,
             selected_idx: 0,
             hovered_idx: None,
@@ -275,8 +286,14 @@ impl SessionList {
 }
 
 impl Element for SessionList {
-    fn rect(&self) -> (f32, f32, f32, f32) { (self.x, self.y, self.w, self.h) }
-    fn set_rect(&mut self, x: f32, y: f32, w: f32, h: f32) { self.x = x; self.y = y; self.w = w; self.h = h; }
+    fn base(&self) -> Option<&Widget> { Some(&self.base) }
+    fn base_mut(&mut self) -> Option<&mut Widget> { Some(&mut self.base) }
+    fn as_ptr(&self) -> *mut (dyn Element + 'static) {
+        self as *const Self as *mut Self as *mut (dyn Element + 'static)
+    }
+    fn as_ptr_mut(&mut self) -> *mut (dyn Element + 'static) {
+        self as *mut Self as *mut (dyn Element + 'static)
+    }
     fn color(&self) -> [f32; 4] { [0.07, 0.07, 0.10, 0.70] } // Semi-transparent sleek dark card background
 
     fn extra_quads(&self) -> Vec<(f32, f32, f32, f32, [f32; 4])> {
@@ -284,24 +301,24 @@ impl Element for SessionList {
         
         // 1. Panel borders (subtle blue accent)
         let border_color = [0.20, 0.40, 0.65, 0.5];
-        quads.push((self.x, self.y, self.w, 1.5, border_color)); // top
-        quads.push((self.x, self.y + self.h - 1.5, self.w, 1.5, border_color)); // bottom
-        quads.push((self.x, self.y, 1.5, self.h, border_color)); // left
-        quads.push((self.x + self.w - 1.5, self.y, 1.5, self.h, border_color)); // right
+        quads.push((self.base.x, self.base.y, self.base.w, 1.5, border_color)); // top
+        quads.push((self.base.x, self.base.y + self.base.h - 1.5, self.base.w, 1.5, border_color)); // bottom
+        quads.push((self.base.x, self.base.y, 1.5, self.base.h, border_color)); // left
+        quads.push((self.base.x + self.base.w - 1.5, self.base.y, 1.5, self.base.h, border_color)); // right
         
-        let item_w = self.w - 20.0;
+        let item_w = self.base.w - 20.0;
         
         // 2. Selected item background
         let selected_color = [0.20, 0.40, 0.65, 0.8]; // Solid blue highlight
-        let sel_y = self.y + 40.0 + self.selected_idx as f32 * 36.0;
-        quads.push((self.x + 10.0, sel_y, item_w, 32.0, selected_color));
+        let sel_y = self.base.y + 40.0 + self.selected_idx as f32 * 36.0;
+        quads.push((self.base.x + 10.0, sel_y, item_w, 32.0, selected_color));
         
         // 3. Hovered item background
         if let Some(h_idx) = self.hovered_idx {
             if h_idx != self.selected_idx && h_idx < self.sessions.len() {
                 let hover_color = [1.0, 1.0, 1.0, 0.06]; // Subtle white overlay
-                let h_y = self.y + 40.0 + h_idx as f32 * 36.0;
-                quads.push((self.x + 10.0, h_y, item_w, 32.0, hover_color));
+                let h_y = self.base.y + 40.0 + h_idx as f32 * 36.0;
+                quads.push((self.base.x + 10.0, h_y, item_w, 32.0, hover_color));
             }
         }
         
@@ -314,15 +331,15 @@ impl Element for SessionList {
         // Header title
         labels.push(TextLabel {
             text: "SESSION MANAGER".to_string(),
-            x: self.x + 15.0,
-            y: self.y + 18.0,
+            x: self.base.x + 15.0,
+            y: self.base.y + 18.0,
             font_size: 11.0,
             color: [0x83, 0x83, 0x8a],
         });
         
         // Session items
         for (i, session) in self.sessions.iter().enumerate() {
-            let item_y = self.y + 40.0 + i as f32 * 36.0;
+            let item_y = self.base.y + 40.0 + i as f32 * 36.0;
             
             let display_name = if session.name == "Bash Shell" {
                 "Bash Shell".to_string()
@@ -338,7 +355,7 @@ impl Element for SessionList {
             
             labels.push(TextLabel {
                 text: display_name,
-                x: self.x + 20.0,
+                x: self.base.x + 20.0,
                 y: item_y + 10.0,
                 font_size: 12.0,
                 color,
@@ -352,10 +369,10 @@ impl Element for SessionList {
         let old_hovered = self.hovered_idx;
         self.hovered_idx = None;
         if self.hit_test(px, py, ctx) {
-            let item_w = self.w - 20.0;
+            let item_w = self.base.w - 20.0;
             for i in 0..self.sessions.len() {
-                let item_y = self.y + 40.0 + i as f32 * 36.0;
-                let item_x = self.x + 10.0;
+                let item_y = self.base.y + 40.0 + i as f32 * 36.0;
+                let item_x = self.base.x + 10.0;
                 if px >= item_x && px <= item_x + item_w && py >= item_y && py <= item_y + 32.0 {
                     self.hovered_idx = Some(i);
                     break;
@@ -368,10 +385,10 @@ impl Element for SessionList {
     fn mouse_input(&mut self, button: MouseButton, state: ElementState, px: f32, py: f32, ctx: &mut UiContext) -> bool {
         if button == MouseButton::Left && state == ElementState::Pressed {
             if self.hit_test(px, py, ctx) {
-                let item_w = self.w - 20.0;
+                let item_w = self.base.w - 20.0;
                 for i in 0..self.sessions.len() {
-                    let item_y = self.y + 40.0 + i as f32 * 36.0;
-                    let item_x = self.x + 10.0;
+                    let item_y = self.base.y + 40.0 + i as f32 * 36.0;
+                    let item_x = self.base.x + 10.0;
                     if px >= item_x && px <= item_x + item_w && py >= item_y && py <= item_y + 32.0 {
                         if self.selected_idx != i {
                             self.selected_idx = i;
@@ -403,6 +420,7 @@ struct State {
     status_lbl: StatusLabel,
     session_list: SessionList,
     ui_context: cce_ui::context::UiContext,
+    root_container: Container,
 
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -580,6 +598,7 @@ impl State {
             status_lbl,
             session_list,
             ui_context: cce_ui::context::UiContext::new(),
+            root_container: Container::new(),
             font_system,
             swash_cache,
             text_atlas,
@@ -597,6 +616,16 @@ impl State {
             login_success: false,
             is_authenticating: false,
         };
+
+        // Establish the cce-ui parent-child widget tree hierarchy
+        let ctx = &mut state.ui_context;
+        focus::link_parent_child(&mut state.root_container, &mut state.card, ctx);
+        focus::link_parent_child(&mut state.root_container, &mut state.session_list, ctx);
+
+        focus::link_parent_child(&mut state.card, &mut state.username_box, ctx);
+        focus::link_parent_child(&mut state.card, &mut state.password_box, ctx);
+        focus::link_parent_child(&mut state.card, &mut state.login_btn, ctx);
+        focus::link_parent_child(&mut state.card, &mut state.status_lbl, ctx);
 
         state.apply_layout();
         state.upload_vertices();
@@ -634,6 +663,9 @@ impl State {
 
         // Background spans the whole screen
         self.bg.set_rect(0.0, 0.0, sw, sh);
+
+        // Root container spans the whole screen
+        self.root_container.set_rect(0.0, 0.0, sw, sh);
 
         // Center card configuration
         let card_w = 360.0;
@@ -819,41 +851,62 @@ impl State {
     }
 
     pub fn widgets_cursor_moved(&mut self, cx: f32, cy: f32) -> bool {
-        let ctx = &mut self.ui_context;
         let mut changed = false;
-        if self.bg.cursor_moved(cx, cy, ctx) { changed = true; }
-        if self.card.cursor_moved(cx, cy, ctx) { changed = true; }
-        if self.username_box.cursor_moved(cx, cy, ctx) { changed = true; }
-        if self.password_box.cursor_moved(cx, cy, ctx) { changed = true; }
-        if self.login_btn.cursor_moved(cx, cy, ctx) { changed = true; }
-        if self.status_lbl.cursor_moved(cx, cy, ctx) { changed = true; }
-        if self.session_list.cursor_moved(cx, cy, ctx) { changed = true; }
+        if self.bg.cursor_moved(cx, cy, &mut self.ui_context) {
+            changed = true;
+        }
+        let event = cce_ui::widget::Event::PointerMove {
+            x: cx,
+            y: cy,
+            local_x: cx,
+            local_y: cy,
+        };
+        let root_ptr = self.root_container.as_ptr_mut();
+        if self.ui_context.propagate_event(&event, root_ptr) {
+            changed = true;
+        }
         changed
     }
 
     pub fn widgets_mouse_input(&mut self, button: MouseButton, state: ElementState, cx: f32, cy: f32) -> bool {
-        let ctx = &mut self.ui_context;
         let mut changed = false;
-        if self.bg.mouse_input(button, state, cx, cy, ctx) { changed = true; }
-        if self.card.mouse_input(button, state, cx, cy, ctx) { changed = true; }
-        if self.username_box.mouse_input(button, state, cx, cy, ctx) { changed = true; }
-        if self.password_box.mouse_input(button, state, cx, cy, ctx) { changed = true; }
-        if self.login_btn.mouse_input(button, state, cx, cy, ctx) { changed = true; }
-        if self.status_lbl.mouse_input(button, state, cx, cy, ctx) { changed = true; }
-        if self.session_list.mouse_input(button, state, cx, cy, ctx) { changed = true; }
+        if self.bg.mouse_input(button, state, cx, cy, &mut self.ui_context) {
+            changed = true;
+        }
+        let event = cce_ui::widget::Event::MouseButton {
+            button,
+            state,
+            x: cx,
+            y: cy,
+            local_x: cx,
+            local_y: cy,
+        };
+        let root_ptr = self.root_container.as_ptr_mut();
+        let handled = self.ui_context.propagate_event(&event, root_ptr);
+        if button == MouseButton::Left && state == ElementState::Pressed {
+            if !handled {
+                self.ui_context.clear_focus();
+                self.username_box.unfocus();
+                self.password_box.unfocus();
+                changed = true;
+            }
+        }
+        if handled {
+            changed = true;
+        }
         changed
     }
 
     pub fn widgets_keyboard_input(&mut self, event: &KeyEvent) -> bool {
-        let ctx = &mut self.ui_context;
         let mut changed = false;
-        if self.bg.keyboard_input(event, ctx) { changed = true; }
-        if self.card.keyboard_input(event, ctx) { changed = true; }
-        if self.username_box.keyboard_input(event, ctx) { changed = true; }
-        if self.password_box.keyboard_input(event, ctx) { changed = true; }
-        if self.login_btn.keyboard_input(event, ctx) { changed = true; }
-        if self.status_lbl.keyboard_input(event, ctx) { changed = true; }
-        if self.session_list.keyboard_input(event, ctx) { changed = true; }
+        if self.bg.keyboard_input(event, &mut self.ui_context) {
+            changed = true;
+        }
+        let ui_event = cce_ui::widget::Event::KeyInput(event.clone());
+        let root_ptr = self.root_container.as_ptr_mut();
+        if self.ui_context.propagate_event(&ui_event, root_ptr) {
+            changed = true;
+        }
         changed
     }
 }
@@ -1058,86 +1111,9 @@ impl PointerHandler for AppState {
                         let mut changed = false;
                         let cx = st.cursor_x;
                         let cy = st.cursor_y;
-                        if btn == MouseButton::Left {
-                            // Unfocus other elements if a click is made
-                            let hit_any = st.status_lbl.hit_test(cx, cy, &st.ui_context)
-                                || st.login_btn.hit_test(cx, cy, &st.ui_context)
-                                || st.session_list.hit_test(cx, cy, &st.ui_context)
-                                || st.password_box.hit_test(cx, cy, &st.ui_context)
-                                || st.username_box.hit_test(cx, cy, &st.ui_context)
-                                || st.card.hit_test(cx, cy, &st.ui_context)
-                                || st.bg.hit_test(cx, cy, &st.ui_context);
-                            if hit_any {
-                                st.ui_context.clear_focus();
-                                st.bg.unfocus();
-                                st.card.unfocus();
-                                st.username_box.unfocus();
-                                st.password_box.unfocus();
-                                st.session_list.unfocus();
-                                st.login_btn.unfocus();
-                                st.status_lbl.unfocus();
-                            }
+                        if st.widgets_mouse_input(btn, ElementState::Pressed, cx, cy) {
+                            changed = true;
                         }
-
-                        // Process the click on the topmost hit widget
-                        if st.status_lbl.hit_test(cx, cy, &st.ui_context) {
-                            if st.status_lbl.mouse_input(btn, ElementState::Pressed, cx, cy, &mut st.ui_context) {
-                                changed = true;
-                            }
-                            if btn == MouseButton::Left {
-                                st.ui_context.set_focused(&mut st.status_lbl);
-                                st.status_lbl.focus();
-                            }
-                        } else if st.login_btn.hit_test(cx, cy, &st.ui_context) {
-                            if st.login_btn.mouse_input(btn, ElementState::Pressed, cx, cy, &mut st.ui_context) {
-                                changed = true;
-                            }
-                            if btn == MouseButton::Left {
-                                st.ui_context.set_focused(&mut st.login_btn);
-                                st.login_btn.focus();
-                            }
-                        } else if st.session_list.hit_test(cx, cy, &st.ui_context) {
-                            if st.session_list.mouse_input(btn, ElementState::Pressed, cx, cy, &mut st.ui_context) {
-                                changed = true;
-                            }
-                            if btn == MouseButton::Left {
-                                st.ui_context.set_focused(&mut st.session_list);
-                                st.session_list.focus();
-                            }
-                        } else if st.password_box.hit_test(cx, cy, &st.ui_context) {
-                            if st.password_box.mouse_input(btn, ElementState::Pressed, cx, cy, &mut st.ui_context) {
-                                changed = true;
-                            }
-                            if btn == MouseButton::Left {
-                                st.ui_context.set_focused(&mut st.password_box);
-                                st.password_box.focus();
-                            }
-                        } else if st.username_box.hit_test(cx, cy, &st.ui_context) {
-                            if st.username_box.mouse_input(btn, ElementState::Pressed, cx, cy, &mut st.ui_context) {
-                                changed = true;
-                            }
-                            if btn == MouseButton::Left {
-                                st.ui_context.set_focused(&mut st.username_box);
-                                st.username_box.focus();
-                            }
-                        } else if st.card.hit_test(cx, cy, &st.ui_context) {
-                            if st.card.mouse_input(btn, ElementState::Pressed, cx, cy, &mut st.ui_context) {
-                                changed = true;
-                            }
-                            if btn == MouseButton::Left {
-                                st.ui_context.set_focused(&mut st.card);
-                                st.card.focus();
-                            }
-                        } else if st.bg.hit_test(cx, cy, &st.ui_context) {
-                            if st.bg.mouse_input(btn, ElementState::Pressed, cx, cy, &mut st.ui_context) {
-                                changed = true;
-                            }
-                            if btn == MouseButton::Left {
-                                st.ui_context.set_focused(&mut st.bg);
-                                st.bg.focus();
-                            }
-                        }
-
                         if changed {
                             st.upload_vertices();
                             self.redraw = true;
@@ -1477,10 +1453,10 @@ struct SystemConfig {
 }
 
 fn load_system_config() -> SystemConfig {
-    let path = "/etc/cce.toml";
+    let path = "/etc/cce/cce.json";
     if std::path::Path::new(path).exists() {
         if let Ok(content) = std::fs::read_to_string(path) {
-            if let Ok(config) = toml::from_str(&content) {
+            if let Ok(config) = serde_json::from_str(&content) {
                 return config;
             }
         }
@@ -1543,7 +1519,7 @@ fn run_greeter() {
     let ph = (768.0 * compositor_scale) as u32;
 
     let window = app.xdg_shell_state.create_window(surface.clone(), WindowDecorations::None, &qh);
-    window.set_title("Clear Display Manager");
+    window.set_title("CCE Display Manager");
     window.set_app_id("cce-display-manager");
     window.set_min_size(Some((pw, ph)));
     window.commit();
@@ -2005,6 +1981,29 @@ fn run_daemon() {
                 continue;
             } else if pid == 0 {
                 // Child process: execute PAM session and spawn the compositor/user session
+                let user = match users::get_user_by_name(&username) {
+                    Some(u) => u,
+                    None => {
+                        log::error!("Error: User '{}' not found in system.", username);
+                        std::process::exit(1);
+                    }
+                };
+
+                let user_uid = user.uid();
+                let user_gid = user.primary_group_id();
+                let home_dir = user.home_dir().to_path_buf();
+                let shell = user.shell().to_str().unwrap_or("/bin/bash").to_string();
+
+                let user_runtime_dir = format!("/run/user/{}", user_uid);
+
+                // Set environment variables in the session worker process before PAM open_session.
+                // This is crucial for pam_gnome_keyring.so / pam_kwallet5.so to run successfully.
+                std::env::set_var("USER", &username);
+                std::env::set_var("LOGNAME", &username);
+                std::env::set_var("HOME", home_dir.to_str().unwrap_or(""));
+                std::env::set_var("SHELL", &shell);
+                std::env::set_var("XDG_RUNTIME_DIR", &user_runtime_dir);
+
                 let service = if password.is_empty() {
                     "cce-display-manager-autologin"
                 } else {
@@ -2056,21 +2055,6 @@ fn run_daemon() {
                         .arg(session_id)
                         .status();
                 }
-
-                let user = match users::get_user_by_name(&username) {
-                    Some(u) => u,
-                    None => {
-                        log::error!("Error: User '{}' not found in system.", username);
-                        std::process::exit(1);
-                    }
-                };
-
-                let user_uid = user.uid();
-                let user_gid = user.primary_group_id();
-                let home_dir = user.home_dir().to_path_buf();
-                let shell = user.shell().to_str().unwrap_or("/bin/bash").to_string();
-
-                let user_runtime_dir = format!("/run/user/{}", user_uid);
                 
                 let (cmd_bin, cmd_args): (String, Vec<String>) = if is_wayland {
                     sanitize_exec(&exec)

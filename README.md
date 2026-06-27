@@ -1,4 +1,4 @@
-# Clear Display Manager
+# CCE Display Manager
 
 `cce-display-manager` is a premium GUI display manager greeter built using the `cce-ui` framework, leveraging Wayland via `smithay-client-toolkit` and GPU-accelerated graphics via `wgpu`. 
 
