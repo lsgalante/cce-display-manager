@@ -15,6 +15,7 @@ TTYVHangup=yes
 TTYVTDisallocate=yes
 UtmpIdentifier=%I
 UtmpMode=user
+Environment=RUST_LOG=info
 
 [Install]
 WantedBy=graphical.target
