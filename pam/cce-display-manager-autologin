@@ -3,7 +3,7 @@
 auth       required     pam_permit.so
 -auth      optional     pam_gnome_keyring.so
 -auth      optional     pam_kwallet5.so
-auth       optional     pam_exec.so expose_authtok /usr/local/bin/save-login-password.sh
+
 
 account    include      system-local-login
 
