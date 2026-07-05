@@ -1,157 +1,20 @@
 use glyphon::{
-    Attrs, Buffer, Cache, FontSystem, Metrics, Resolution, SwashCache, TextArea, TextAtlas,
-    TextBounds, TextRenderer, Viewport,
+    Attrs, Buffer, FontSystem, Metrics, TextArea, TextBounds,
 };
-
-use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_keyboard, delegate_pointer, delegate_registry,
-    delegate_seat, delegate_shm, delegate_xdg_shell, delegate_xdg_window, delegate_output,
-    registry::{ProvidesRegistryState, RegistryState},
-    output::{OutputHandler, OutputState},
-    seat::{
-        keyboard::KeyboardHandler,
-        pointer::{PointerHandler, ThemedPointer, ThemeSpec, CursorIcon},
-        Capability, SeatHandler, SeatState,
-    },
-    shell::{
-        xdg::{
-            window::{Window as XdgWindow, WindowConfigure, WindowHandler, WindowDecorations},
-            XdgShell,
-        },
-        WaylandSurface,
-    },
-    shm::{Shm, ShmHandler},
-};
-use wayland_client::{
-    globals::registry_queue_init,
-    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
-    Connection, QueueHandle, Proxy,
-};
-use calloop::{EventLoop, channel};
-use calloop_wayland_source::WaylandSource;
 
 use cce_ui::widget::{
     Button, ContentBg, TextLabel, Element, ElementState, MouseButton, Key, NamedKey, KeyEvent, TextBox,
-    Widget, Container, focus
+    Widget, Container, focus, MouseScrollDelta, TextItem
 };
 use cce_ui::context::UiContext;
+use wayland_client::QueueHandle;
+use cce_ui::engine::{EngineState, LogicalPosition, LogicalSize, WindowSettings, Vertex, quad_vertices};
+use smithay_client_toolkit::shell::xdg::window::WindowDecorations;
+use calloop::channel;
 
-const CUSTOM_SHADER: &str = r#"
-struct VertexOutput {
-    @builtin(position) clip_position: vec4f,
-    @location(0) color: vec4f,
-    @location(1) ndc_position: vec2f,
-    @location(2) is_background: f32,
-    @location(3) clip_circle: vec3f,
-}
 
-@vertex
-fn vs_main(
-    @location(0) position: vec2f,
-    @location(1) color: vec4f,
-    @location(2) clip_circle: vec3f,
-) -> VertexOutput {
-    var out: VertexOutput;
-    out.clip_position = vec4f(position, 0.0, 1.0);
-    out.color = color;
-    out.ndc_position = position;
-    out.clip_circle = clip_circle;
 
-    if (abs(position.x) > 0.999 && abs(position.y) > 0.999) {
-        out.is_background = 1.0;
-    } else {
-        out.is_background = 0.0;
-    }
 
-    return out;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    if (in.clip_circle.x == -999.0) {
-        let y = length(vec2f(in.ndc_position.x, in.ndc_position.y));
-        let x = atan2(in.ndc_position.y, in.ndc_position.x);
-
-        // Wavy boundary radius with 7 lobes
-        let R_theta = 0.60 + 0.06 * sin(7.0 * x);
-
-        // Radial density: 1.0 at center, fading out to 0.0 at R_theta
-        let density = 1.0 - smoothstep(R_theta - 0.25, R_theta, y);
-
-        // Sine wave effect driven by the x value (distance around the circle)
-        let sin_effect = sin(7.0 * x);
-
-        // Normalized radius from 0.0 (center) to 1.0 (boundary)
-        let r_normalized = clamp(y / R_theta, 0.0, 1.0);
-
-        let gray = in.color.xyz;
-        
-        // Scale the ripple amplitude by the normalized radius to fade it out at the center
-        let alpha = clamp(density * (1.0 - r_normalized * 0.25 * (1.0 - sin_effect)), 0.0, 1.0);
-        
-        if (y > R_theta + 0.02) {
-            discard;
-        }
-        
-        let final_alpha = alpha * (1.0 - smoothstep(R_theta - 0.02, R_theta + 0.02, y)) * in.color.w;
-        return vec4f(gray, final_alpha);
-    }
-
-    if (in.clip_circle.z > 0.0) {
-        let dx = in.clip_position.x - in.clip_circle.x;
-        let dy = in.clip_position.y - in.clip_circle.y;
-        if (dx * dx + dy * dy > in.clip_circle.z * in.clip_circle.z) {
-            discard;
-        }
-    }
-    return in.color;
-}
-"#;
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
-    position: [f32; 2],
-    color: [f32; 4],
-    clip_circle: [f32; 3],
-}
-
-impl Vertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![
-        0 => Float32x2,
-        1 => Float32x4,
-        2 => Float32x3,
-    ];
-
-    fn desc() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &Self::ATTRIBS,
-        }
-    }
-}
-
-fn quad_vertices(
-    x: f32, y: f32, w: f32, h: f32,
-    surface_w: f32, surface_h: f32,
-    color: [f32; 4],
-) -> [Vertex; 6] {
-    let x0 = (x / surface_w) * 2.0 - 1.0;
-    let y0 = 1.0 - (y / surface_h) * 2.0;
-    let x1 = ((x + w) / surface_w) * 2.0 - 1.0;
-    let y1 = 1.0 - ((y + h) / surface_h) * 2.0;
-
-    [
-        Vertex { position: [x0, y0], color, clip_circle: [0.0; 3] },
-        Vertex { position: [x1, y0], color, clip_circle: [0.0; 3] },
-        Vertex { position: [x0, y1], color, clip_circle: [0.0; 3] },
-        Vertex { position: [x1, y0], color, clip_circle: [0.0; 3] },
-        Vertex { position: [x1, y1], color, clip_circle: [0.0; 3] },
-        Vertex { position: [x0, y1], color, clip_circle: [0.0; 3] },
-    ]
-}
 
 fn widget_vertices(w: &dyn Element, sw: f32, sh: f32) -> Vec<Vertex> {
     let (x, y, ww, h) = w.rect();
@@ -470,14 +333,6 @@ impl Element for SessionList {
 
 // ── App State and Renderer ──
 struct State {
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    render_pipeline: wgpu::RenderPipeline,
-    vertex_buffer: wgpu::Buffer,
-    vertex_count: u32,
-
     bg: ContentBg,
     card: LoginCard,
     username_box: TextBox,
@@ -489,11 +344,6 @@ struct State {
     root_container: Container,
 
     font_system: FontSystem,
-    swash_cache: SwashCache,
-    text_atlas: TextAtlas,
-    text_renderer: TextRenderer,
-    text_viewport: Viewport,
-
     info_buffer: Buffer,
 
     cursor_x: f32,
@@ -504,188 +354,18 @@ struct State {
     physical_width: u32,
     physical_height: u32,
     scale: f64,
-    compositor_scale: f64,
 
     // State tracking
     login_success: bool,
     is_authenticating: bool,
+    auth_request_id: u64,
+    auth_sender: channel::Sender<AuthEvent>,
+    auth_receiver: Option<channel::Channel<AuthEvent>>,
+
+    text_items: Vec<TextItem>,
 }
 
 impl State {
-    async fn new(
-        wayland_handle: &'static cce_ui::wayland::WaylandSurfaceHandle,
-        pw: u32, ph: u32,
-        scale: f64,
-        compositor_scale: f64,
-        sessions: Vec<Session>,
-    ) -> Self {
-        let lw = pw as f32 / scale as f32;
-        let lh = ph as f32 / scale as f32;
-
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
-            ..Default::default()
-        });
-
-        let surface = instance.create_surface(wayland_handle).expect("wgpu surface");
-        let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-        }).await.expect("adapter");
-
-        let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("GPU Device"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
-            memory_hints: wgpu::MemoryHints::MemoryUsage,
-        }, None).await.expect("device");
-
-        let mut config = surface.get_default_config(&adapter, pw, ph).expect("config");
-        config.present_mode = wgpu::PresentMode::Fifo;
-        surface.configure(&device, &config);
-
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(CUSTOM_SHADER.into()),
-        });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Pipeline Layout"),
-            bind_group_layouts: &[],
-            push_constant_ranges: &[],
-        });
-
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Vertex::desc()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
-            multiview: None,
-            cache: None,
-        });
-
-        let mut font_system = FontSystem::new();
-        let swash_cache = SwashCache::new();
-        let cache = Cache::new(&device);
-        let mut text_atlas = TextAtlas::new(&device, &queue, &cache, config.format);
-        let text_renderer = TextRenderer::new(&mut text_atlas, &device, wgpu::MultisampleState::default(), None);
-
-        let mut text_viewport = Viewport::new(&device, &cache);
-        text_viewport.update(&queue, Resolution { width: pw, height: ph });
-
-        let info_buffer = make_text_buffer(&mut font_system, "Press Tab to switch fields • Session selector: Click current session label", 11.0);
-
-        // Prepopulate username from last_user file if it exists
-        let last_user_path = "/var/lib/cce-display-manager/last_user";
-        let current_user = if std::path::Path::new(last_user_path).exists() {
-            std::fs::read_to_string(last_user_path)
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|_| String::new())
-        } else {
-            let env_user = std::env::var("USER").unwrap_or_else(|_| String::new());
-            if env_user == "root" || env_user == "cce-display-manager" {
-                String::new()
-            } else {
-                env_user
-            }
-        };
-
-        let last_session_path = "/var/lib/cce-display-manager/last_session";
-        let last_session_exec = if std::path::Path::new(last_session_path).exists() {
-            std::fs::read_to_string(last_session_path)
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|_| String::new())
-        } else {
-            String::new()
-        };
-
-        let mut selected_idx = 0;
-        if !last_session_exec.is_empty() {
-            if let Some(pos) = sessions.iter().position(|s| s.exec == last_session_exec) {
-                selected_idx = pos;
-            }
-        }
-
-        let bg = ContentBg::new();
-        let card = LoginCard::new();
-        let username_box = TextBox::new(current_user).with_label("USERNAME");
-        let password_box = TextBox::new(String::new()).with_password(true).with_label("PASSWORD");
-        let login_btn = Button::new(0.0, 0.0, 300.0, 36.0).with_label("Log In");
-        let status_lbl = StatusLabel::new("Enter password to start".to_string());
-        let mut session_list = SessionList::new(sessions);
-        session_list.selected_idx = selected_idx;
-
-        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Vertex Buffer"),
-            size: 1,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let state = Self {
-            surface,
-            device,
-            queue,
-            config,
-            render_pipeline,
-            vertex_buffer,
-            vertex_count: 0,
-            bg,
-            card,
-            username_box,
-            password_box,
-            login_btn,
-            status_lbl,
-            session_list,
-            ui_context: cce_ui::context::UiContext::new(),
-            root_container: Container::new(),
-            font_system,
-            swash_cache,
-            text_atlas,
-            text_renderer,
-            text_viewport,
-            info_buffer,
-            cursor_x: 0.0,
-            cursor_y: 0.0,
-            width: lw,
-            height: lh,
-            physical_width: pw,
-            physical_height: ph,
-            scale,
-            compositor_scale,
-            login_success: false,
-            is_authenticating: false,
-        };
-
-        state
-    }
-
     fn widgets_iter(&self) -> Vec<&dyn Element> {
         vec![
             &self.bg,
@@ -751,172 +431,32 @@ impl State {
         self.session_list.set_rect(30.0, 30.0, list_w, list_h);
     }
 
-    fn collect_vertices(&self) -> Vec<Vertex> {
-        let sw = self.width;
-        let sh = self.height;
-        let mut verts = Vec::new();
-        for w in self.widgets_iter() {
-            let is_card = w.base().map_or(false, |b| std::ptr::eq(b, &self.card.base));
-            let mut w_verts = widget_vertices(w, sw, sh);
-            if is_card {
-                for v in &mut w_verts {
-                    v.clip_circle = [-999.0, 0.0, 0.0];
-                }
-            }
-            verts.extend(w_verts);
-            for (qx, qy, qw, qh, qc) in w.all_quads(&self.ui_context) {
-                let mut q_verts = quad_vertices(qx, qy, qw, qh, sw, sh, qc).to_vec();
-                if is_card {
-                    for v in &mut q_verts {
-                        v.clip_circle = [-999.0, 0.0, 0.0];
-                    }
-                }
-                verts.extend(q_verts);
-            }
-        }
-        verts
-    }
+    fn rebuild_text_items(&mut self) {
+        self.text_items.clear();
 
-    fn upload_vertices(&mut self) {
-        let verts = self.collect_vertices();
-        self.vertex_count = verts.len() as u32;
-        if self.vertex_count == 0 { return; }
-        
-        let data = bytemuck::cast_slice(&verts);
-        let needed = data.len() as wgpu::BufferAddress;
-        if needed > self.vertex_buffer.size() {
-            self.vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Vertex Buffer"),
-                size: needed,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-        }
-        self.queue.write_buffer(&self.vertex_buffer, 0, data);
-    }
+        self.text_items.push(TextItem {
+            buffer: self.info_buffer.clone(),
+            x: 20.0,
+            y: self.height - 24.0,
+            color: glyphon::Color::rgb(0x60, 0x60, 0x6e),
+            bounds: None,
+        });
 
-    fn prepare_text(&mut self) {
-        let scale_f32 = self.scale as f32;
-
-        let viewport = Resolution { width: self.physical_width, height: self.physical_height };
-        self.text_viewport.update(&self.queue, viewport);
-
-        let mut areas: Vec<TextArea> = vec![
-            TextArea {
-                buffer: &self.info_buffer,
-                left: (20.0 * scale_f32).round(),
-                top: (self.physical_height as f32 - 24.0 * scale_f32).round(),
-                scale: scale_f32,
-                bounds: TextBounds {
-                    left: 0, top: 0,
-                    right: self.physical_width as i32,
-                    bottom: self.physical_height as i32,
-                },
-                default_color: glyphon::Color::rgb(0x60, 0x60, 0x6e),
-                custom_glyphs: &[],
-            }
-        ];
-
-        let mut widget_labels: Vec<TextLabel> = Vec::new();
+        let mut widget_labels = Vec::new();
         for w in self.widgets_iter() {
             widget_labels.extend(w.text_labels());
         }
 
-        let mut widget_buffers: Vec<Buffer> = Vec::new();
         for label in &widget_labels {
-            widget_buffers.push(make_text_buffer(&mut self.font_system, &label.text, label.font_size));
-        }
-
-        for (buf, label) in widget_buffers.iter().zip(widget_labels.iter()) {
-            areas.push(TextArea {
+            let buf = make_text_buffer(&mut self.font_system, &label.text, label.font_size);
+            self.text_items.push(TextItem {
                 buffer: buf,
-                left: (label.x * scale_f32).round(),
-                top: (label.y * scale_f32).round(),
-                scale: scale_f32,
-                bounds: TextBounds {
-                    left: 0, top: 0,
-                    right: self.physical_width as i32,
-                    bottom: self.physical_height as i32,
-                },
-                default_color: glyphon::Color::rgb(label.color[0], label.color[1], label.color[2]),
-                custom_glyphs: &[],
+                x: label.x,
+                y: label.y,
+                color: glyphon::Color::rgb(label.color[0], label.color[1], label.color[2]),
+                bounds: None,
             });
         }
-
-        self.text_renderer
-            .prepare(&self.device, &self.queue, &mut self.font_system, &mut self.text_atlas, &self.text_viewport, areas, &mut self.swash_cache)
-            .unwrap();
-    }
-
-    fn resize(&mut self, width: u32, height: u32) {
-        if width > 0 && height > 0 {
-            self.physical_width = width;
-            self.physical_height = height;
-            self.width = width as f32 / self.scale as f32;
-            self.height = height as f32 / self.scale as f32;
-            self.config.width = width;
-            self.config.height = height;
-            self.surface.configure(&self.device, &self.config);
-            self.apply_layout();
-            self.upload_vertices();
-        }
-    }
-
-    fn render(&mut self) {
-        self.prepare_text();
-
-        let output = match self.surface.get_current_texture() {
-            Ok(t) => t,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                self.surface.configure(&self.device, &self.config);
-                return;
-            }
-            Err(wgpu::SurfaceError::Timeout) => return,
-            Err(e) => {
-                log::error!("Surface error: {:?}", e);
-                return;
-            }
-        };
-
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Encoder"),
-        });
-
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.03,
-                            g: 0.03,
-                            b: 0.05,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-            if self.vertex_count > 0 {
-                pass.set_pipeline(&self.render_pipeline);
-                pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-                pass.draw(0..self.vertex_count, 0..1);
-            }
-
-            self.text_renderer
-                .render(&self.text_atlas, &self.text_viewport, &mut pass)
-                .unwrap();
-        }
-
-        self.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
     }
 
     pub fn widgets_cursor_moved(&mut self, cx: f32, cy: f32) -> bool {
@@ -978,6 +518,412 @@ impl State {
         }
         changed
     }
+    fn trigger_auth(&mut self) {
+        let username = self.username_box.text.trim().to_string();
+        let password = self.password_box.text.trim().to_string();
+
+        if username.is_empty() {
+            self.status_lbl.text = "Username cannot be empty".to_string();
+            self.status_lbl.is_error = true;
+            self.ui_context.set_focused(&mut self.username_box);
+            self.username_box.focus();
+        } else if password.is_empty() {
+            if is_fprint_enabled() {
+                self.auth_request_id += 1;
+                self.status_lbl.text = "Scan finger to login or type password".to_string();
+                self.status_lbl.is_error = false;
+                self.is_authenticating = true;
+                self.login_btn.base_mut().unwrap().label = Some("Authenticating...".to_string());
+                authenticate_user(self.auth_request_id, username, password, self.auth_sender.clone());
+            } else {
+                self.status_lbl.text = "Password cannot be empty".to_string();
+                self.status_lbl.is_error = true;
+                self.ui_context.set_focused(&mut self.password_box);
+                self.password_box.focus();
+            }
+        } else {
+            self.auth_request_id += 1;
+            self.status_lbl.text = "Authenticating...".to_string();
+            self.status_lbl.is_error = false;
+            self.is_authenticating = true;
+            self.login_btn.base_mut().unwrap().label = Some("Authenticating...".to_string());
+            authenticate_user(self.auth_request_id, username, password, self.auth_sender.clone());
+        }
+    }
+}
+
+impl cce_ui::engine::Application for State {
+    type Message = String;
+
+    fn new(_qh: &QueueHandle<cce_ui::engine::EngineState<Self>>, _sender: channel::Sender<Self::Message>) -> Self {
+        let (auth_sender, auth_receiver) = channel::channel::<AuthEvent>();
+        let mut font_system = cce_ui::create_font_system();
+        let info_buffer = make_text_buffer(&mut font_system, "Press Tab to switch fields • Session selector: Click current session label", 11.0);
+
+        // Prepopulate username from last_user file if it exists
+        let last_user_path = "/var/lib/cce-display-manager/last_user";
+        let current_user = if std::path::Path::new(last_user_path).exists() {
+            std::fs::read_to_string(last_user_path)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| String::new())
+        } else {
+            let env_user = std::env::var("USER").unwrap_or_else(|_| String::new());
+            if env_user == "root" || env_user == "cce-display-manager" {
+                String::new()
+            } else {
+                env_user
+            }
+        };
+
+        let sessions = discover_sessions();
+        let last_session_path = "/var/lib/cce-display-manager/last_session";
+        let last_session_exec = if std::path::Path::new(last_session_path).exists() {
+            std::fs::read_to_string(last_session_path)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| String::new())
+        } else {
+            String::new()
+        };
+
+        let mut selected_idx = 0;
+        if !last_session_exec.is_empty() {
+            if let Some(pos) = sessions.iter().position(|s| s.exec == last_session_exec) {
+                selected_idx = pos;
+            }
+        }
+
+        let bg = ContentBg::new();
+        let card = LoginCard::new();
+        let username_box = TextBox::new(current_user).with_label("USERNAME");
+        let password_box = TextBox::new(String::new()).with_password(true).with_label("PASSWORD");
+        let login_btn = Button::new(0.0, 0.0, 300.0, 36.0).with_label("Log In");
+        let status_lbl = StatusLabel::new("Enter password to start".to_string());
+        let mut session_list = SessionList::new(sessions);
+        session_list.selected_idx = selected_idx;
+
+        let mut app = Self {
+            bg,
+            card,
+            username_box,
+            password_box,
+            login_btn,
+            status_lbl,
+            session_list,
+            ui_context: cce_ui::context::UiContext::new(),
+            root_container: Container::new(),
+            info_buffer,
+            font_system,
+            cursor_x: 0.0,
+            cursor_y: 0.0,
+            width: 1024.0,
+            height: 768.0,
+            physical_width: 1024,
+            physical_height: 768,
+            scale: 1.0,
+            login_success: false,
+            is_authenticating: false,
+            auth_request_id: 0,
+            auth_sender,
+            auth_receiver: Some(auth_receiver),
+            text_items: Vec::new(),
+        };
+
+        // Establish cce-ui parent-child widget tree hierarchy
+        let ctx = &mut app.ui_context;
+        focus::link_parent_child(&mut app.root_container, &mut app.card, ctx);
+        focus::link_parent_child(&mut app.root_container, &mut app.session_list, ctx);
+
+        focus::link_parent_child(&mut app.card, &mut app.username_box, ctx);
+        focus::link_parent_child(&mut app.card, &mut app.password_box, ctx);
+        focus::link_parent_child(&mut app.card, &mut app.login_btn, ctx);
+        focus::link_parent_child(&mut app.card, &mut app.status_lbl, ctx);
+
+        let has_username = !app.username_box.text.trim().to_string().is_empty();
+        if has_username {
+            app.ui_context.set_focused(&mut app.password_box);
+            app.password_box.focus();
+        } else {
+            app.ui_context.set_focused(&mut app.username_box);
+            app.username_box.focus();
+        }
+
+        // Start background fingerprint/empty-password authentication if username is prepopulated and fprintd is enabled!
+        let username = app.username_box.text.trim().to_string();
+        if !username.is_empty() {
+            if is_fprint_enabled() {
+                app.auth_request_id += 1;
+                app.is_authenticating = true;
+                app.login_btn.base_mut().unwrap().label = Some("Authenticating...".to_string());
+                app.status_lbl.text = "Scan finger to login or type password".to_string();
+                authenticate_user(app.auth_request_id, username, String::new(), app.auth_sender.clone());
+            }
+        }
+
+        app
+    }
+
+    fn settings(&self) -> WindowSettings {
+        WindowSettings {
+            title: "CCE Display Manager".to_string(),
+            app_id: "cce-display-manager".to_string(),
+            width: 1024,
+            height: 768,
+            fullscreen: false,
+            min_size: Some((1024, 768)),
+        }
+    }
+
+    fn update(&mut self, _msg: Self::Message, _needs_rebuild: &mut bool, _exit: &mut bool) {}
+
+    fn tick(&mut self, _dt: f32, _needs_rebuild: &mut bool) {}
+
+    fn view(&mut self, quads: &mut Vec<(f32, f32, f32, f32, [f32; 4])>, size: LogicalSize, scale: f64) {
+        if (self.width - size.width as f32).abs() > 0.001 || (self.height - size.height as f32).abs() > 0.001 || (self.scale - scale).abs() > 0.001 {
+            self.width = size.width as f32;
+            self.height = size.height as f32;
+            self.physical_width = (size.width * scale as f32) as u32;
+            self.physical_height = (size.height * scale as f32) as u32;
+            self.scale = scale;
+            self.apply_layout();
+            self.rebuild_text_items();
+        }
+
+        for w in self.widgets_iter() {
+            let is_card = w.base().map_or(false, |b| std::ptr::eq(b, &self.card.base));
+            if !is_card {
+                quads.extend(w.all_quads(&self.ui_context));
+            }
+        }
+    }
+
+    fn view_rounded_quads(&mut self, quads: &mut Vec<(f32, f32, f32, f32, f32, [f32; 4], (bool, bool, bool, bool))>, _size: LogicalSize, _scale: f64) {
+        for w in self.widgets_iter() {
+            let is_card = w.base().map_or(false, |b| std::ptr::eq(b, &self.card.base));
+            if !is_card {
+                quads.extend(w.all_rounded_quads(&self.ui_context));
+            }
+        }
+    }
+
+    fn custom_vertices(&mut self, verts: &mut Vec<Vertex>, _size: LogicalSize, _scale: f64) {
+        let sw = self.width;
+        let sh = self.height;
+
+        let mut card_verts = widget_vertices(&self.card, sw, sh);
+        for v in &mut card_verts {
+            v.clip_circle = [-999.0, 0.0, 0.0];
+        }
+        verts.extend(card_verts);
+
+        for (qx, qy, qw, qh, qc) in self.card.all_quads(&self.ui_context) {
+            let mut q_verts = quad_vertices(qx, qy, qw, qh, sw, sh, qc).to_vec();
+            for v in &mut q_verts {
+                v.clip_circle = [-999.0, 0.0, 0.0];
+            }
+            verts.extend(q_verts);
+        }
+    }
+
+    fn text_items(&self) -> &[TextItem] {
+        &self.text_items
+    }
+
+    fn register_sources(&mut self, handle: &calloop::LoopHandle<'_, EngineState<Self>>) {
+        if let Some(auth_receiver) = self.auth_receiver.take() {
+            handle.insert_source(auth_receiver, |event, _metadata, engine_state| {
+                let app = engine_state.inner.as_mut().unwrap();
+                let mut redraw = false;
+                match event {
+                    channel::Event::Msg(msg) => {
+                        let ev_request_id = match &msg {
+                            AuthEvent::Success { request_id, .. } => *request_id,
+                            AuthEvent::Failure { request_id, .. } => *request_id,
+                            AuthEvent::Info { request_id, .. } => *request_id,
+                        };
+
+                        if ev_request_id != app.auth_request_id {
+                            return;
+                        }
+
+                        match msg {
+                            AuthEvent::Success { username, .. } => {
+                                app.is_authenticating = false;
+                                app.login_btn.base_mut().unwrap().label = Some("Log In".to_string());
+                                app.status_lbl.text = format!("Welcome, {}!", username);
+                                app.status_lbl.is_error = false;
+                                app.login_success = true;
+                                if let Some(session) = app.session_list.selected_session() {
+                                    println!("AUTH_SUCCESS|{}|{}|{}|{}", app.username_box.text.trim(), session.exec, session.is_wayland, app.password_box.text.trim());
+                                    std::process::exit(0);
+                                }
+                            }
+                            AuthEvent::Failure { err_msg, .. } => {
+                                app.is_authenticating = false;
+                                app.login_btn.base_mut().unwrap().label = Some("Log In".to_string());
+                                app.status_lbl.text = err_msg;
+                                app.status_lbl.is_error = true;
+                                app.password_box.text.clear();
+                                app.password_box.edit_buffer.clear();
+                                app.ui_context.set_focused(&mut app.password_box);
+                                app.password_box.focus();
+                            }
+                            AuthEvent::Info { msg, .. } => {
+                                app.status_lbl.text = msg;
+                                app.status_lbl.is_error = false;
+                            }
+                        }
+                        redraw = true;
+                    }
+                    channel::Event::Closed => {}
+                }
+                if redraw {
+                    app.rebuild_text_items();
+                    engine_state.redraw = true;
+                }
+            }).unwrap();
+        }
+    }
+
+    fn handle_pointer_move(&mut self, pos: LogicalPosition, needs_rebuild: &mut bool) {
+        let lx = pos.x as f32;
+        let ly = pos.y as f32;
+        self.cursor_x = lx;
+        self.cursor_y = ly;
+        if self.widgets_cursor_moved(lx, ly) {
+            *needs_rebuild = true;
+            self.rebuild_text_items();
+        }
+    }
+
+    fn handle_mouse_input(&mut self, button: MouseButton, state: ElementState, pos: LogicalPosition, needs_rebuild: &mut bool) -> Option<Self::Message> {
+        if self.is_authenticating {
+            return None;
+        }
+        let lx = pos.x as f32;
+        let ly = pos.y as f32;
+        let mut changed = false;
+        if self.widgets_mouse_input(button, state, lx, ly) {
+            changed = true;
+        }
+        if button == MouseButton::Left && state == ElementState::Pressed {
+            if self.login_btn.take_click() {
+                self.trigger_auth();
+                changed = true;
+            }
+        }
+        if changed {
+            *needs_rebuild = true;
+            self.rebuild_text_items();
+        }
+        None
+    }
+
+    fn handle_mouse_wheel(&mut self, _delta: &MouseScrollDelta, _pos: LogicalPosition, _needs_rebuild: &mut bool) {}
+
+    fn handle_key_input(&mut self, event: &KeyEvent, needs_rebuild: &mut bool) -> Option<Self::Message> {
+        let logical_key = &event.logical_key;
+        let ctrl_pressed = event.ctrl;
+
+        // Check for Ctrl+C to abort/exit back to TTY
+        if ctrl_pressed && (logical_key == &Key::Character("c".to_string()) || logical_key == &Key::Character("C".to_string())) {
+            log::error!("Ctrl+C pressed. Aborting greeter.");
+            std::process::exit(130);
+        }
+
+        // Check for F5 to request daemon restart
+        if logical_key == &Key::Named(NamedKey::F5) {
+            log::info!("F5 pressed. Requesting daemon restart.");
+            std::process::exit(135);
+        }
+
+        let is_ctrl_p = ctrl_pressed && (logical_key == &Key::Character("p".to_string()) || logical_key == &Key::Character("P".to_string()));
+        let is_ctrl_n = ctrl_pressed && (logical_key == &Key::Character("n".to_string()) || logical_key == &Key::Character("N".to_string()));
+
+        if event.state == ElementState::Pressed {
+            // If we are currently in fingerprint authentication and the user starts typing a password,
+            // cancel the fingerprint auth and let them type.
+            if self.is_authenticating {
+                if self.password_box.text.is_empty() {
+                    let is_typing = !ctrl_pressed && match logical_key {
+                        Key::Character(_) | Key::Named(NamedKey::Backspace) | Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Space) => true,
+                        _ => false,
+                    };
+                    if is_typing {
+                        self.auth_request_id += 1;
+                        self.is_authenticating = false;
+                        self.login_btn.base_mut().unwrap().label = Some("Log In".to_string());
+                        self.status_lbl.text = "Enter password to start".to_string();
+                        self.status_lbl.is_error = false;
+                    } else {
+                        let is_nav = match logical_key {
+                            Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => true,
+                            _ => is_ctrl_p || is_ctrl_n,
+                        };
+                        if !is_nav {
+                            return None;
+                        }
+                    }
+                } else {
+                    return None;
+                }
+            }
+
+            let mut changed = false;
+
+            // Handle Up/Down or Ctrl+P/N navigation to cycle sessions
+            let cycle_up = (logical_key == &Key::Named(NamedKey::ArrowUp) || is_ctrl_p) && !self.session_list.sessions.is_empty();
+            let cycle_down = (logical_key == &Key::Named(NamedKey::ArrowDown) || is_ctrl_n) && !self.session_list.sessions.is_empty();
+
+            if cycle_up {
+                let len = self.session_list.sessions.len();
+                self.session_list.selected_idx = (self.session_list.selected_idx + len - 1) % len;
+                self.session_list.hovered_idx = None;
+                changed = true;
+            } else if cycle_down {
+                let len = self.session_list.sessions.len();
+                self.session_list.selected_idx = (self.session_list.selected_idx + 1) % len;
+                self.session_list.hovered_idx = None;
+                changed = true;
+            } else if logical_key == &Key::Named(NamedKey::Tab) {
+                let is_user_focused = self.username_box.focused(&self.ui_context);
+                if is_user_focused {
+                    self.ui_context.set_focused(&mut self.password_box);
+                    self.username_box.unfocus();
+                    self.password_box.focus();
+                } else {
+                    self.ui_context.set_focused(&mut self.username_box);
+                    self.password_box.unfocus();
+                    self.username_box.focus();
+                }
+                changed = true;
+            } else if logical_key == &Key::Named(NamedKey::Enter) && self.password_box.focused(&self.ui_context) {
+                self.password_box.keyboard_input(event, &mut self.ui_context);
+                self.trigger_auth();
+                changed = true;
+            } else if logical_key == &Key::Named(NamedKey::Enter) && self.username_box.focused(&self.ui_context) {
+                self.username_box.keyboard_input(event, &mut self.ui_context);
+                self.ui_context.set_focused(&mut self.password_box);
+                self.username_box.unfocus();
+                self.password_box.focus();
+                changed = true;
+            } else {
+                if self.widgets_keyboard_input(event) {
+                    changed = true;
+                }
+            }
+
+            if changed {
+                *needs_rebuild = true;
+                self.rebuild_text_items();
+            }
+        }
+
+        None
+    }
+
+    fn clear_color(&self) -> [f32; 4] {
+        [0.03, 0.03, 0.05, 1.0]
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1008,548 +954,25 @@ fn authenticate_user(request_id: u64, username: String, password: String, sender
         
         let mut auth = match PamSession::new(service, &username, &password, request_id, Some(sender.clone())) {
             Ok(a) => a,
-            Err(_) => {
-                match PamSession::new("login", &username, &password, request_id, Some(sender.clone())) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        let _ = sender.send(AuthEvent::Failure { request_id, err_msg: format!("PAM Init Error: {:?}", e) });
-                        return;
-                    }
-                }
+            Err(e) => {
+                let _ = sender.send(AuthEvent::Failure { request_id, err_msg: format!("{:?}", e) });
+                return;
             }
         };
 
-        match auth.authenticate() {
-            Ok(_) => {
-                let _ = sender.send(AuthEvent::Success { request_id, username });
-            }
-            Err(e) => {
-                let _ = sender.send(AuthEvent::Failure { request_id, err_msg: format!("Authentication failed: {:?}", e) });
-            }
+        if let Err(e) = auth.authenticate() {
+            let _ = sender.send(AuthEvent::Failure { request_id, err_msg: format!("{:?}", e) });
+            return;
         }
+
+        if let Err(e) = auth.open_session() {
+            let _ = sender.send(AuthEvent::Failure { request_id, err_msg: format!("{:?}", e) });
+            return;
+        }
+
+        let _ = sender.send(AuthEvent::Success { request_id, username });
     });
 }
-
-// ── AppState and Client Callbacks ──
-struct AppState {
-    registry_state: RegistryState,
-    compositor_state: CompositorState,
-    xdg_shell_state: XdgShell,
-    shm_state: Shm,
-    seat_state: SeatState,
-    output_state: OutputState,
-
-    seats: Vec<wl_seat::WlSeat>,
-    pointer: Option<ThemedPointer>,
-    keyboard: Option<wl_keyboard::WlKeyboard>,
-
-    window: Option<XdgWindow>,
-    surface: Option<wl_surface::WlSurface>,
-
-    state: Option<State>,
-    exit: bool,
-    redraw: bool,
-    ctrl_pressed: bool,
-    shift_pressed: bool,
-    pressed_key: Option<PressedKey>,
-    auth_sender: channel::Sender<AuthEvent>,
-    auth_request_id: u64,
-}
-
-#[allow(dead_code)]
-struct PressedKey {
-    logical_key: Key,
-    text: Option<String>,
-    first_pressed: std::time::Instant,
-    last_repeated: std::time::Instant,
-}
-
-impl CompositorHandler for AppState {
-    fn scale_factor_changed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        surface: &wl_surface::WlSurface,
-        scale_factor: i32,
-    ) {
-        let sys_config = load_system_config();
-        let compositor_scale = scale_factor as f64;
-        let layout_scale = sys_config.scale.unwrap_or(compositor_scale);
-        
-        surface.set_buffer_scale(scale_factor);
-        if let Some(state) = &mut self.state {
-            let logical_w = state.physical_width as f64 / state.compositor_scale;
-            let logical_h = state.physical_height as f64 / state.compositor_scale;
-            
-            state.compositor_scale = compositor_scale;
-            state.scale = layout_scale;
-            
-            let pw = (logical_w * compositor_scale) as u32;
-            let ph = (logical_h * compositor_scale) as u32;
-            state.resize(pw, ph);
-        }
-        self.redraw = true;
-    }
-
-    fn transform_changed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _surface: &wl_surface::WlSurface, _new_transform: wl_output::Transform) {}
-    fn frame(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _surface: &wl_surface::WlSurface, _time: u32) {}
-    fn surface_enter(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _surface: &wl_surface::WlSurface, _output: &wl_output::WlOutput) {}
-    fn surface_leave(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _surface: &wl_surface::WlSurface, _output: &wl_output::WlOutput) {}
-}
-
-impl OutputHandler for AppState {
-    fn output_state(&mut self) -> &mut OutputState { &mut self.output_state }
-    fn new_output(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _output: wl_output::WlOutput) {}
-    fn update_output(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _output: wl_output::WlOutput) {}
-    fn output_destroyed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _output: wl_output::WlOutput) {}
-}
-
-impl SeatHandler for AppState {
-    fn seat_state(&mut self) -> &mut SeatState { &mut self.seat_state }
-    
-    fn new_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
-        self.seats.push(seat);
-    }
-
-    fn new_capability(&mut self, _conn: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, capability: Capability) {
-        if capability == Capability::Pointer && self.pointer.is_none() {
-            let surface = self.compositor_state.create_surface(qh);
-            let themed_pointer = self.seat_state.get_pointer_with_theme(
-                qh,
-                &seat,
-                self.shm_state.wl_shm(),
-                surface,
-                ThemeSpec::System,
-            ).unwrap();
-            self.pointer = Some(themed_pointer);
-        }
-        if capability == Capability::Keyboard && self.keyboard.is_none() {
-            let keyboard = self.seat_state.get_keyboard(qh, &seat, None).unwrap();
-            self.keyboard = Some(keyboard);
-        }
-    }
-
-    fn remove_capability(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: wl_seat::WlSeat, capability: Capability) {
-        if capability == Capability::Pointer { self.pointer = None; }
-        if capability == Capability::Keyboard { self.keyboard = None; }
-    }
-
-    fn remove_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
-        self.seats.retain(|s| s != &seat);
-    }
-}
-
-impl ShmHandler for AppState {
-    fn shm_state(&mut self) -> &mut Shm { &mut self.shm_state }
-}
-
-impl PointerHandler for AppState {
-    fn pointer_frame(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _pointer: &wl_pointer::WlPointer,
-        events: &[smithay_client_toolkit::seat::pointer::PointerEvent],
-    ) {
-        use smithay_client_toolkit::seat::pointer::PointerEventKind;
-        for event in events {
-            let (x, y) = event.position;
-            if let Some(state) = &mut self.state {
-                let ratio = state.compositor_scale / state.scale;
-                state.cursor_x = (x * ratio) as f32;
-                state.cursor_y = (y * ratio) as f32;
-            }
-
-            match &event.kind {
-                PointerEventKind::Enter { .. } => {
-                    if let Some(ref themed_pointer) = self.pointer {
-                        let _ = themed_pointer.set_cursor(_conn, CursorIcon::Default);
-                    }
-                }
-                PointerEventKind::Leave { .. } => {}
-                PointerEventKind::Motion { .. } => {
-                    if let Some(state) = &mut self.state {
-                        let cx = state.cursor_x;
-                        let cy = state.cursor_y;
-                        let mut changed = false;
-                        if state.widgets_cursor_moved(cx, cy) {
-                            changed = true;
-                        }
-                        if changed {
-                            state.upload_vertices();
-                            self.redraw = true;
-                        }
-                    }
-                }
-                PointerEventKind::Press { button, .. } => {
-                    let btn = match *button {
-                        272 => MouseButton::Left,
-                        273 => MouseButton::Right,
-                        274 => MouseButton::Middle,
-                        _ => continue,
-                    };
-                    if let Some(st) = &mut self.state {
-                        if st.is_authenticating {
-                            continue;
-                        }
-                        let mut changed = false;
-                        let cx = st.cursor_x;
-                        let cy = st.cursor_y;
-                        if st.widgets_mouse_input(btn, ElementState::Pressed, cx, cy) {
-                            changed = true;
-                        }
-                        if changed {
-                            st.upload_vertices();
-                            self.redraw = true;
-                        }
-                    }
-                }
-                PointerEventKind::Release { button, .. } => {
-                    let btn = match *button {
-                        272 => MouseButton::Left,
-                        273 => MouseButton::Right,
-                        274 => MouseButton::Middle,
-                        _ => continue,
-                    };
-                    if let Some(st) = &mut self.state {
-                        if st.is_authenticating {
-                            continue;
-                        }
-                        let cx = st.cursor_x;
-                        let cy = st.cursor_y;
-                        let mut changed = false;
-                        if st.widgets_mouse_input(btn, ElementState::Released, cx, cy) {
-                            changed = true;
-                        }
-                        if btn == MouseButton::Left {
-                            // Handle login click
-                            if st.login_btn.take_click() {
-                                // Extract login username and password
-                                let username = st.username_box.text.trim().to_string();
-                                let password = st.password_box.text.trim().to_string();
-
-                                if username.is_empty() {
-                                    st.status_lbl.text = "Username cannot be empty".to_string();
-                                    st.status_lbl.is_error = true;
-                                    st.ui_context.set_focused(&mut st.username_box);
-                                    st.username_box.focus();
-                                } else if password.is_empty() {
-                                    if is_fprint_enabled() {
-                                        self.auth_request_id += 1;
-                                        st.status_lbl.text = "Scan finger to login or type password".to_string();
-                                        st.status_lbl.is_error = false;
-                                        st.is_authenticating = true;
-                                        st.login_btn.base_mut().unwrap().label = Some("Authenticating...".to_string());
-                                        authenticate_user(self.auth_request_id, username, password, self.auth_sender.clone());
-                                    } else {
-                                        st.status_lbl.text = "Password cannot be empty".to_string();
-                                        st.status_lbl.is_error = true;
-                                        st.ui_context.set_focused(&mut st.password_box);
-                                        st.password_box.focus();
-                                    }
-                                } else {
-                                    self.auth_request_id += 1;
-                                    st.status_lbl.text = "Authenticating...".to_string();
-                                    st.status_lbl.is_error = false;
-                                    st.is_authenticating = true;
-                                    st.login_btn.base_mut().unwrap().label = Some("Authenticating...".to_string());
-                                    authenticate_user(self.auth_request_id, username, password, self.auth_sender.clone());
-                                }
-                                changed = true;
-                            }
-                        }
-                        if changed {
-                            st.upload_vertices();
-                            self.redraw = true;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-impl AppState {
-    fn handle_key(&mut self, event: smithay_client_toolkit::seat::keyboard::KeyEvent, state: ElementState) {
-        let keysym = event.keysym;
-
-        // Check for Ctrl+C to abort/exit back to TTY
-        if self.ctrl_pressed && (keysym == xkeysym::Keysym::c || keysym == xkeysym::Keysym::C) {
-            log::error!("Ctrl+C pressed. Aborting greeter.");
-            std::process::exit(130);
-        }
-
-        // Check for F5 to request daemon restart
-        if keysym == xkeysym::Keysym::F5 {
-            log::info!("F5 pressed. Requesting daemon restart.");
-            std::process::exit(135);
-        }
-
-        let logical_key = match keysym {
-            xkeysym::Keysym::BackSpace => Key::Named(NamedKey::Backspace),
-            xkeysym::Keysym::Tab => Key::Named(NamedKey::Tab),
-            xkeysym::Keysym::Return | xkeysym::Keysym::KP_Enter => Key::Named(NamedKey::Enter),
-            xkeysym::Keysym::Escape => Key::Named(NamedKey::Escape),
-            xkeysym::Keysym::space => Key::Named(NamedKey::Space),
-            xkeysym::Keysym::Left => Key::Named(NamedKey::ArrowLeft),
-            xkeysym::Keysym::Right => Key::Named(NamedKey::ArrowRight),
-            xkeysym::Keysym::Up => Key::Named(NamedKey::ArrowUp),
-            xkeysym::Keysym::Down => Key::Named(NamedKey::ArrowDown),
-            xkeysym::Keysym::Delete => Key::Named(NamedKey::Delete),
-            xkeysym::Keysym::Home => Key::Named(NamedKey::Home),
-            xkeysym::Keysym::End => Key::Named(NamedKey::End),
-            _ => {
-                if let Some(ref text) = event.utf8 {
-                    Key::Character(text.clone())
-                } else if let Some(ch) = event.keysym.key_char() {
-                    Key::Character(ch.to_string())
-                } else {
-                    return;
-                }
-            }
-        };
-
-        let text = event.utf8.clone();
-
-        let custom_event = KeyEvent {
-            state,
-            logical_key: logical_key.clone(),
-            text: text.clone(),
-            repeat: false,
-            ctrl: self.ctrl_pressed,
-            shift: self.shift_pressed,
-        };
-
-        let is_ctrl_p = self.ctrl_pressed && (keysym == xkeysym::Keysym::p || keysym == xkeysym::Keysym::P);
-        let is_ctrl_n = self.ctrl_pressed && (keysym == xkeysym::Keysym::n || keysym == xkeysym::Keysym::N);
-
-        if state == ElementState::Pressed {
-            if let Some(st) = &mut self.state {
-                // If we are currently in fingerprint authentication and the user starts typing a password,
-                // cancel the fingerprint auth and let them type.
-                if st.is_authenticating {
-                    if st.password_box.text.is_empty() {
-                        let is_typing = !self.ctrl_pressed && match &logical_key {
-                            Key::Character(_) | Key::Named(NamedKey::Backspace) | Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Space) => true,
-                            _ => false,
-                        };
-                        if is_typing {
-                            self.auth_request_id += 1;
-                            st.is_authenticating = false;
-                            st.login_btn.base_mut().unwrap().label = Some("Log In".to_string());
-                            st.status_lbl.text = "Enter password to start".to_string();
-                            st.status_lbl.is_error = false;
-                        } else {
-                            let is_nav = match &logical_key {
-                                Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => true,
-                                _ => is_ctrl_p || is_ctrl_n,
-                            };
-                            if !is_nav {
-                                return;
-                            }
-                        }
-                    } else {
-                        return;
-                    }
-                }
-
-                let mut changed = false;
-
-                // Handle Up/Down or Ctrl+P/N navigation to cycle sessions
-                let cycle_up = (logical_key == Key::Named(NamedKey::ArrowUp) || is_ctrl_p) && !st.session_list.sessions.is_empty();
-                let cycle_down = (logical_key == Key::Named(NamedKey::ArrowDown) || is_ctrl_n) && !st.session_list.sessions.is_empty();
-
-                if cycle_up {
-                    let len = st.session_list.sessions.len();
-                    st.session_list.selected_idx = (st.session_list.selected_idx + len - 1) % len;
-                    st.session_list.hovered_idx = None;
-                    changed = true;
-                } else if cycle_down {
-                    let len = st.session_list.sessions.len();
-                    st.session_list.selected_idx = (st.session_list.selected_idx + 1) % len;
-                    st.session_list.hovered_idx = None;
-                    changed = true;
-                } else if logical_key == Key::Named(NamedKey::Tab) {
-                    let is_user_focused = st.username_box.focused(&st.ui_context);
-                    if is_user_focused {
-                        st.ui_context.set_focused(&mut st.password_box);
-                        st.username_box.unfocus();
-                        st.password_box.focus();
-                    } else {
-                        st.ui_context.set_focused(&mut st.username_box);
-                        st.password_box.unfocus();
-                        st.username_box.focus();
-                    }
-                    changed = true;
-                } else if logical_key == Key::Named(NamedKey::Enter) && st.password_box.focused(&st.ui_context) {
-                    // Process Enter in the password box to commit the buffer
-                    st.password_box.keyboard_input(&custom_event, &mut st.ui_context);
-
-                    // Extract login username and password
-                    let username = st.username_box.text.trim().to_string();
-                    let password = st.password_box.text.trim().to_string();
-
-                    if username.is_empty() {
-                        st.status_lbl.text = "Username cannot be empty".to_string();
-                        st.status_lbl.is_error = true;
-                        st.ui_context.set_focused(&mut st.username_box);
-                        st.username_box.focus();
-                    } else if password.is_empty() {
-                        if is_fprint_enabled() {
-                            self.auth_request_id += 1;
-                            st.status_lbl.text = "Scan finger to login or type password".to_string();
-                            st.status_lbl.is_error = false;
-                            st.is_authenticating = true;
-                            st.login_btn.base_mut().unwrap().label = Some("Authenticating...".to_string());
-                            authenticate_user(self.auth_request_id, username, password, self.auth_sender.clone());
-                        } else {
-                            st.status_lbl.text = "Password cannot be empty".to_string();
-                            st.status_lbl.is_error = true;
-                            st.ui_context.set_focused(&mut st.password_box);
-                            st.password_box.focus();
-                        }
-                    } else {
-                        self.auth_request_id += 1;
-                        st.status_lbl.text = "Authenticating...".to_string();
-                        st.status_lbl.is_error = false;
-                        st.is_authenticating = true;
-                        st.login_btn.base_mut().unwrap().label = Some("Authenticating...".to_string());
-                        authenticate_user(self.auth_request_id, username, password, self.auth_sender.clone());
-                    }
-                    changed = true;
-                } else if logical_key == Key::Named(NamedKey::Enter) && st.username_box.focused(&st.ui_context) {
-                    // Pressing enter in the username box commits and shifts focus to the password box
-                    st.username_box.keyboard_input(&custom_event, &mut st.ui_context);
-                    st.ui_context.set_focused(&mut st.password_box);
-                    st.username_box.unfocus();
-                    st.password_box.focus();
-                    changed = true;
-                } else {
-                    if st.widgets_keyboard_input(&custom_event) {
-                        changed = true;
-                    }
-                }
-
-                if changed {
-                    st.upload_vertices();
-                    self.redraw = true;
-                }
-            }
-
-            self.pressed_key = Some(PressedKey {
-                logical_key,
-                text,
-                first_pressed: std::time::Instant::now(),
-                last_repeated: std::time::Instant::now(),
-            });
-        } else {
-            self.pressed_key = None;
-        }
-    }
-}
-
-impl KeyboardHandler for AppState {
-    fn enter(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _keyboard: &wl_keyboard::WlKeyboard,
-        _surface: &wl_surface::WlSurface,
-        _serial: u32,
-        _raw_modifiers: &[u32],
-        _keysyms: &[xkeysym::Keysym],
-    ) {}
-
-    fn leave(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _keyboard: &wl_keyboard::WlKeyboard,
-        _surface: &wl_surface::WlSurface,
-        _serial: u32,
-    ) {
-        self.pressed_key = None;
-        self.ctrl_pressed = false;
-        self.shift_pressed = false;
-    }
-
-    fn press_key(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _keyboard: &wl_keyboard::WlKeyboard,
-        _serial: u32,
-        event: smithay_client_toolkit::seat::keyboard::KeyEvent,
-    ) {
-        self.handle_key(event, ElementState::Pressed);
-    }
-
-    fn release_key(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _keyboard: &wl_keyboard::WlKeyboard,
-        _serial: u32,
-        event: smithay_client_toolkit::seat::keyboard::KeyEvent,
-    ) {
-        self.handle_key(event, ElementState::Released);
-    }
-
-    fn update_modifiers(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _keyboard: &wl_keyboard::WlKeyboard,
-        _serial: u32,
-        modifiers: smithay_client_toolkit::seat::keyboard::Modifiers,
-        _layout: u32,
-    ) {
-        self.ctrl_pressed = modifiers.ctrl;
-        self.shift_pressed = modifiers.shift;
-    }
-}
-
-impl WindowHandler for AppState {
-    fn configure(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _window: &XdgWindow,
-        configure: WindowConfigure,
-        _serial: u32,
-    ) {
-        let (w, h) = configure.new_size;
-        let width = w.map(|v| v.get()).unwrap_or(1024);
-        let height = h.map(|v| v.get()).unwrap_or(768);
-        if let Some(state) = &mut self.state {
-            let pw = (width as f64 * state.compositor_scale) as u32;
-            let ph = (height as f64 * state.compositor_scale) as u32;
-            state.resize(pw, ph);
-        }
-        self.redraw = true;
-    }
-
-    fn request_close(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _window: &XdgWindow) {
-        self.exit = true;
-    }
-}
-
-impl ProvidesRegistryState for AppState {
-    fn registry(&mut self) -> &mut RegistryState { &mut self.registry_state }
-    fn runtime_add_global(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _name: u32, _interface: &str, _version: u32) {}
-    fn runtime_remove_global(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _name: u32, _interface: &str) {}
-}
-
-delegate_compositor!(AppState);
-delegate_xdg_shell!(AppState);
-delegate_xdg_window!(AppState);
-delegate_shm!(AppState);
-delegate_seat!(AppState);
-delegate_pointer!(AppState);
-delegate_keyboard!(AppState);
-delegate_registry!(AppState);
-delegate_output!(AppState);
 
 #[derive(serde::Deserialize, Debug, Default)]
 struct SystemConfig {
@@ -1574,182 +997,8 @@ fn run_greeter() {
     let cursor_size = (24.0 * layout_scale) as u32;
     std::env::set_var("XCURSOR_SIZE", cursor_size.to_string());
 
-    let conn = Connection::connect_to_env().expect("Wayland connection");
-    let (globals, mut event_queue) = registry_queue_init(&conn).expect("registry init");
-    let qh = event_queue.handle();
+    cce_ui::engine::run::<State>();
 
-    let compositor_state = CompositorState::bind(&globals, &qh).unwrap();
-    let xdg_shell_state = XdgShell::bind(&globals, &qh).unwrap();
-    let shm_state = Shm::bind(&globals, &qh).unwrap();
-    let seat_state = SeatState::new(&globals, &qh);
-    let output_state = OutputState::new(&globals, &qh);
-
-    let (auth_sender, auth_receiver) = channel::channel::<AuthEvent>();
-
-    let mut app = AppState {
-        registry_state: RegistryState::new(&globals),
-        compositor_state,
-        xdg_shell_state,
-        shm_state,
-        seat_state,
-        output_state,
-        seats: Vec::new(),
-        pointer: None,
-        keyboard: None,
-        window: None,
-        surface: None,
-        state: None,
-        exit: false,
-        redraw: true,
-        ctrl_pressed: false,
-        shift_pressed: false,
-        pressed_key: None,
-        auth_sender,
-        auth_request_id: 0,
-    };
-
-    event_queue.roundtrip(&mut app).unwrap();
-
-    let sys_config = load_system_config();
-    log::info!("Loaded system config: {:?}", sys_config);
-    let compositor_scale = cce_ui::wayland::detect_scale_factor(&app.output_state);
-    log::info!("Detected compositor scale factor from Wayland: {}", compositor_scale);
-    let layout_scale = sys_config.scale.unwrap_or(compositor_scale);
-    log::info!("Final resolved layout scale factor: {}", layout_scale);
-    let surface = app.compositor_state.create_surface(&qh);
-    surface.set_buffer_scale(compositor_scale as i32);
-
-    let pw = (1024.0 * compositor_scale) as u32;
-    let ph = (768.0 * compositor_scale) as u32;
-
-    let window = app.xdg_shell_state.create_window(surface.clone(), WindowDecorations::None, &qh);
-    window.set_title("CCE Display Manager");
-    window.set_app_id("cce-display-manager");
-    window.set_min_size(Some((pw, ph)));
-    window.commit();
-
-    let wayland_handle = Box::leak(Box::new(cce_ui::wayland::WaylandSurfaceHandle {
-        display_ptr: conn.backend().display_id().as_ptr() as *mut std::ffi::c_void,
-        surface_ptr: surface.id().as_ptr() as *mut std::ffi::c_void,
-    }));
-
-    let sessions = discover_sessions();
-    let state = pollster::block_on(State::new(wayland_handle, pw, ph, layout_scale, compositor_scale, sessions));
-
-    app.window = Some(window);
-    app.surface = Some(surface);
-    app.state = Some(state);
-
-    // Set initial focus now that State is in its final, stable memory location inside app.state
-    if let Some(ref mut st) = app.state {
-        // Establish the cce-ui parent-child widget tree hierarchy now that State is stable in memory
-        let ctx = &mut st.ui_context;
-        focus::link_parent_child(&mut st.root_container, &mut st.card, ctx);
-        focus::link_parent_child(&mut st.root_container, &mut st.session_list, ctx);
-
-        focus::link_parent_child(&mut st.card, &mut st.username_box, ctx);
-        focus::link_parent_child(&mut st.card, &mut st.password_box, ctx);
-        focus::link_parent_child(&mut st.card, &mut st.login_btn, ctx);
-        focus::link_parent_child(&mut st.card, &mut st.status_lbl, ctx);
-
-        st.apply_layout();
-        st.upload_vertices();
-
-        let has_username = !st.username_box.text.trim().to_string().is_empty();
-        if has_username {
-            st.ui_context.set_focused(&mut st.password_box);
-            st.password_box.focus();
-        } else {
-            st.ui_context.set_focused(&mut st.username_box);
-            st.username_box.focus();
-        }
-        st.upload_vertices();
-
-        // Start background fingerprint/empty-password authentication if username is prepopulated and fprintd is enabled!
-        let username = st.username_box.text.trim().to_string();
-        if !username.is_empty() {
-            if is_fprint_enabled() {
-                app.auth_request_id += 1;
-                st.is_authenticating = true;
-                st.login_btn.base_mut().unwrap().label = Some("Authenticating...".to_string());
-                st.status_lbl.text = "Scan finger to login or type password".to_string();
-                authenticate_user(app.auth_request_id, username, String::new(), app.auth_sender.clone());
-            }
-        }
-    }
-
-    let mut event_loop = EventLoop::try_new().unwrap();
-    let loop_handle = event_loop.handle();
-    WaylandSource::new(conn, event_queue).insert(loop_handle.clone()).unwrap();
-
-    loop_handle.insert_source(auth_receiver, |event, _metadata, app_state| {
-        match event {
-            channel::Event::Msg(msg) => {
-                let ev_request_id = match &msg {
-                    AuthEvent::Success { request_id, .. } => *request_id,
-                    AuthEvent::Failure { request_id, .. } => *request_id,
-                    AuthEvent::Info { request_id, .. } => *request_id,
-                };
-
-                if ev_request_id != app_state.auth_request_id {
-                    // Ignore stale/cancelled auth events
-                    return;
-                }
-
-                if let Some(st) = &mut app_state.state {
-                    match msg {
-                        AuthEvent::Success { username, .. } => {
-                            st.is_authenticating = false;
-                            st.login_btn.base_mut().unwrap().label = Some("Log In".to_string());
-                            st.status_lbl.text = format!("Welcome, {}!", username);
-                            st.status_lbl.is_error = false;
-                            st.login_success = true;
-                            app_state.exit = true;
-                        }
-                        AuthEvent::Failure { err_msg, .. } => {
-                            st.is_authenticating = false;
-                            st.login_btn.base_mut().unwrap().label = Some("Log In".to_string());
-                            st.status_lbl.text = err_msg;
-                            st.status_lbl.is_error = true;
-                            st.password_box.text.clear();
-                            st.password_box.edit_buffer.clear();
-                            st.ui_context.set_focused(&mut st.password_box);
-                            st.password_box.focus();
-                        }
-                        AuthEvent::Info { msg, .. } => {
-                            st.status_lbl.text = msg;
-                            st.status_lbl.is_error = false;
-                        }
-                    }
-                    st.upload_vertices();
-                    app_state.redraw = true;
-                }
-            }
-            channel::Event::Closed => {}
-        }
-    }).unwrap();
-
-    loop {
-        event_loop.dispatch(std::time::Duration::from_millis(16), &mut app).unwrap();
-        if app.exit { break; }
-
-        if app.redraw {
-            app.redraw = false;
-            if let Some(st) = &mut app.state {
-                st.render();
-            }
-        }
-    }
-
-    // Print authentication success data and exit
-    if let Some(st) = app.state {
-        if st.login_success {
-            if let Some(session) = st.session_list.selected_session() {
-                println!("AUTH_SUCCESS|{}|{}|{}|{}", st.username_box.text.trim(), session.exec, session.is_wayland, st.password_box.text.trim());
-                std::process::exit(0);
-            }
-        }
-    }
     std::process::exit(1);
 }
 
