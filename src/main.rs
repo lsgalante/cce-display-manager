@@ -441,6 +441,20 @@ impl State {
             bounds: None,
         });
 
+        // Build-date stamp in the bottom-right corner.
+        let build_buf = make_text_buffer(
+            &mut self.font_system,
+            concat!("Built ", env!("CCE_BUILD_DATE")),
+            11.0,
+        );
+        self.text_items.push(TextItem {
+            buffer: build_buf,
+            x: self.width - 130.0,
+            y: self.height - 24.0,
+            color: glyphon::Color::rgb(0x60, 0x60, 0x6e),
+            bounds: None,
+        });
+
         let mut widget_labels = Vec::new();
         for w in self.widgets_iter() {
             widget_labels.extend(w.text_labels());
