@@ -1,5 +1,5 @@
 use glyphon::{
-    Attrs, Buffer, FontSystem, Metrics, TextArea, TextBounds,
+    Attrs, Buffer, FontSystem, Metrics,
 };
 
 use cce_ui::widget::{
@@ -9,7 +9,6 @@ use cce_ui::widget::{
 use cce_ui::context::UiContext;
 use wayland_client::QueueHandle;
 use cce_ui::engine::{EngineState, LogicalPosition, LogicalSize, WindowSettings, Vertex, quad_vertices};
-use smithay_client_toolkit::shell::xdg::window::WindowDecorations;
 use calloop::channel;
 
 
