@@ -336,7 +336,7 @@ struct State {
     card: LoginCard,
     username_box: TextBox,
     password_box: TextBox,
-    login_btn: Button,
+    login_btn: cce_ui::widget::Adapted<cce_ui::widget::Button>,
     status_lbl: StatusLabel,
     session_list: SessionList,
     ui_context: cce_ui::context::UiContext,
