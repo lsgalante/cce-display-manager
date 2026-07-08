@@ -332,7 +332,7 @@ impl Element for SessionList {
 
 // ── App State and Renderer ──
 struct State {
-    bg: ContentBg,
+    bg: cce_ui::widget::Adapted<ContentBg>,
     card: LoginCard,
     username_box: TextBox,
     password_box: TextBox,
