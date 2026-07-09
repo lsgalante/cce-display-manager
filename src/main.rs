@@ -334,8 +334,8 @@ impl Element for SessionList {
 struct State {
     bg: cce_ui::widget::Adapted<ContentBg>,
     card: LoginCard,
-    username_box: TextBox,
-    password_box: TextBox,
+    username_box: cce_ui::widget::Adapted<TextBox>,
+    password_box: cce_ui::widget::Adapted<TextBox>,
     login_btn: cce_ui::widget::Adapted<cce_ui::widget::Button>,
     status_lbl: StatusLabel,
     session_list: SessionList,
