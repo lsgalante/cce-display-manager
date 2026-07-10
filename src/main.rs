@@ -1,10 +1,6 @@
-use glyphon::{
-    Attrs, Buffer, FontSystem, Metrics,
-};
-
 use cce_ui::widget::{
     Button, ContentBg, TextLabel, Element, ElementState, MouseButton, Key, NamedKey, KeyEvent, TextBox,
-    Widget, Container, focus, MouseScrollDelta, TextItem
+    Widget, Container, focus, MouseScrollDelta
 };
 use cce_ui::context::UiContext;
 use wayland_client::QueueHandle;
@@ -20,13 +16,6 @@ fn widget_vertices(w: &dyn Element, sw: f32, sh: f32) -> Vec<Vertex> {
     quad_vertices(x, y, ww, h, sw, sh, w.color()).to_vec()
 }
 
-fn make_text_buffer(font_system: &mut FontSystem, text: &str, size: f32) -> Buffer {
-    let metrics = Metrics::new(size, size * 1.4);
-    let mut buffer = Buffer::new(font_system, metrics);
-    buffer.set_text(font_system, text, Attrs::new(), glyphon::Shaping::Advanced);
-    buffer.shape_until_scroll(font_system, true);
-    buffer
-}
 
 
 
@@ -342,8 +331,6 @@ struct State {
     ui_context: cce_ui::context::UiContext,
     root_container: Container,
 
-    font_system: FontSystem,
-    info_buffer: Buffer,
 
     cursor_x: f32,
     cursor_y: f32,
@@ -361,7 +348,6 @@ struct State {
     auth_sender: channel::Sender<AuthEvent>,
     auth_receiver: Option<channel::Channel<AuthEvent>>,
 
-    text_items: Vec<TextItem>,
 }
 
 impl State {
@@ -428,48 +414,6 @@ impl State {
         let list_w = 260.0;
         let list_h = 40.0 + self.session_list.sessions.len() as f32 * 36.0;
         self.session_list.set_rect(30.0, 30.0, list_w, list_h);
-    }
-
-    fn rebuild_text_items(&mut self) {
-        self.text_items.clear();
-
-        self.text_items.push(TextItem {
-            buffer: self.info_buffer.clone(),
-            x: 20.0,
-            y: self.height - 24.0,
-            color: glyphon::Color::rgb(0x60, 0x60, 0x6e),
-            bounds: None,
-        });
-
-        // Build-date stamp in the bottom-right corner.
-        let build_buf = make_text_buffer(
-            &mut self.font_system,
-            concat!("Built ", env!("CCE_BUILD_DATE")),
-            11.0,
-        );
-        self.text_items.push(TextItem {
-            buffer: build_buf,
-            x: self.width - 130.0,
-            y: self.height - 24.0,
-            color: glyphon::Color::rgb(0x60, 0x60, 0x6e),
-            bounds: None,
-        });
-
-        let mut widget_labels = Vec::new();
-        for w in self.widgets_iter() {
-            widget_labels.extend(w.text_labels());
-        }
-
-        for label in &widget_labels {
-            let buf = make_text_buffer(&mut self.font_system, &label.text, label.font_size);
-            self.text_items.push(TextItem {
-                buffer: buf,
-                x: label.x,
-                y: label.y,
-                color: glyphon::Color::rgb(label.color[0], label.color[1], label.color[2]),
-                bounds: None,
-            });
-        }
     }
 
     pub fn widgets_cursor_moved(&mut self, cx: f32, cy: f32) -> bool {
@@ -570,8 +514,6 @@ impl cce_ui::engine::Application for State {
 
     fn new(_qh: &QueueHandle<cce_ui::engine::EngineState<Self>>, _sender: channel::Sender<Self::Message>) -> Self {
         let (auth_sender, auth_receiver) = channel::channel::<AuthEvent>();
-        let mut font_system = cce_ui::create_font_system();
-        let info_buffer = make_text_buffer(&mut font_system, "Press Tab to switch fields • Session selector: Click current session label", 11.0);
 
         // Prepopulate username from last_user file if it exists
         let last_user_path = "/var/lib/cce-display-manager/last_user";
@@ -624,8 +566,6 @@ impl cce_ui::engine::Application for State {
             session_list,
             ui_context: cce_ui::context::UiContext::new(),
             root_container: Container::new(),
-            info_buffer,
-            font_system,
             cursor_x: 0.0,
             cursor_y: 0.0,
             width: 1024.0,
@@ -638,7 +578,6 @@ impl cce_ui::engine::Application for State {
             auth_request_id: 0,
             auth_sender,
             auth_receiver: Some(auth_receiver),
-            text_items: Vec::new(),
         };
 
         // Establish cce-ui parent-child widget tree hierarchy
@@ -690,7 +629,13 @@ impl cce_ui::engine::Application for State {
 
     fn tick(&mut self, _dt: f32, _needs_rebuild: &mut bool) {}
 
-    fn view(&mut self, quads: &mut Vec<(f32, f32, f32, f32, [f32; 4])>, size: LogicalSize, scale: f64) {
+    fn display_list(&mut self, size: LogicalSize, scale: f64) -> Option<cce_ui::scene::paint::DisplayList> {
+        // Phase 6ah single paint path: the widget geometry (the legacy view_rounded_quads
+        // then view() bodies, in the wrapper's order) and all text are this one list. The
+        // card — the soft radial-glow blob with the circular clip disabled — stays in
+        // custom_vertices, appended on top exactly as before (it is the escape-hatch layer,
+        // not part of the display-list geometry).
+        use cce_ui::scene::layout::Rect;
         if (self.width - size.width as f32).abs() > 0.001 || (self.height - size.height as f32).abs() > 0.001 || (self.scale - scale).abs() > 0.001 {
             self.width = size.width as f32;
             self.height = size.height as f32;
@@ -698,24 +643,66 @@ impl cce_ui::engine::Application for State {
             self.physical_height = (size.height * scale as f32) as u32;
             self.scale = scale;
             self.apply_layout();
-            self.rebuild_text_items();
+        }
+
+        let mut pc = cce_ui::scene::paint::PaintCtx::new();
+
+        for w in self.widgets_iter() {
+            let is_card = w.base().map_or(false, |b| std::ptr::eq(b, &self.card.base));
+            if is_card {
+                continue;
+            }
+            for (qx, qy, qw, qh, qr, qc, qcorners) in w.all_rounded_quads(&self.ui_context) {
+                let rect = Rect { x: qx, y: qy, width: qw, height: qh };
+                if qr > 0.1 {
+                    pc.rounded_rect(rect, qr, qcorners, qc);
+                } else {
+                    pc.quad(rect, qc);
+                }
+            }
         }
 
         for w in self.widgets_iter() {
             let is_card = w.base().map_or(false, |b| std::ptr::eq(b, &self.card.base));
-            if !is_card {
-                quads.extend(w.all_quads(&self.ui_context));
+            if is_card {
+                continue;
+            }
+            for (qx, qy, qw, qh, qc) in w.all_quads(&self.ui_context) {
+                pc.quad(Rect { x: qx, y: qy, width: qw, height: qh }, qc);
             }
         }
+
+        pc.text_with(
+            "Press Tab to switch fields • Session selector: Click current session label".to_string(),
+            20.0,
+            self.height - 24.0,
+            11.0,
+            [0x60, 0x60, 0x6e],
+            None,
+            None,
+        );
+        pc.text_with(
+            concat!("Built ", env!("CCE_BUILD_DATE")).to_string(),
+            self.width - 130.0,
+            self.height - 24.0,
+            11.0,
+            [0x60, 0x60, 0x6e],
+            None,
+            None,
+        );
+        let mut widget_labels = Vec::new();
+        for w in self.widgets_iter() {
+            widget_labels.extend(w.text_labels());
+        }
+        for label in widget_labels {
+            pc.text_with(label.text, label.x, label.y, label.font_size, label.color, None, None);
+        }
+
+        Some(pc.finish())
     }
 
-    fn view_rounded_quads(&mut self, quads: &mut Vec<(f32, f32, f32, f32, f32, [f32; 4], (bool, bool, bool, bool))>, _size: LogicalSize, _scale: f64) {
-        for w in self.widgets_iter() {
-            let is_card = w.base().map_or(false, |b| std::ptr::eq(b, &self.card.base));
-            if !is_card {
-                quads.extend(w.all_rounded_quads(&self.ui_context));
-            }
-        }
+    fn display_list_text(&self) -> bool {
+        true
     }
 
     fn custom_vertices(&mut self, verts: &mut Vec<Vertex>, _size: LogicalSize, _scale: f64) {
@@ -735,10 +722,6 @@ impl cce_ui::engine::Application for State {
             }
             verts.extend(q_verts);
         }
-    }
-
-    fn text_items(&self) -> &[TextItem] {
-        &self.text_items
     }
 
     fn register_sources(&mut self, handle: &calloop::LoopHandle<'_, EngineState<Self>>) {
@@ -790,7 +773,6 @@ impl cce_ui::engine::Application for State {
                     channel::Event::Closed => {}
                 }
                 if redraw {
-                    app.rebuild_text_items();
                     engine_state.redraw = true;
                 }
             }).unwrap();
@@ -804,7 +786,6 @@ impl cce_ui::engine::Application for State {
         self.cursor_y = ly;
         if self.widgets_cursor_moved(lx, ly) {
             *needs_rebuild = true;
-            self.rebuild_text_items();
         }
     }
 
@@ -826,7 +807,6 @@ impl cce_ui::engine::Application for State {
         }
         if changed {
             *needs_rebuild = true;
-            self.rebuild_text_items();
         }
         None
     }
@@ -927,7 +907,6 @@ impl cce_ui::engine::Application for State {
 
             if changed {
                 *needs_rebuild = true;
-                self.rebuild_text_items();
             }
         }
 
