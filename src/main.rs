@@ -137,6 +137,16 @@ impl Element for LoginCard {
             },
         ]
     }
+
+    fn paint_self(&self, _ui: &UiContext, ctx: &mut cce_ui::scene::paint::PaintCtx) {
+        // A container with OWN (non-aggregating) labels: the default paint_self drops
+        // container text — it assumes container text_labels aggregate children. Emit the
+        // card's header labels here. Geometry intentionally stays out: the card plate is
+        // drawn via custom_vertices (circular clip disabled), not the display list.
+        for tl in self.text_labels() {
+            ctx.text(tl.text, tl.x, tl.y, tl.font_size, tl.color);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -363,6 +373,31 @@ impl State {
         ]
     }
 
+    /// (Re-)register the widget tree at the widgets' CURRENT addresses. `new()` cannot do
+    /// this — it would capture pointers into its own stack frame that dangle once the State
+    /// moves — so this runs at the top of every frame. register/link are id-keyed and
+    /// idempotent, and everything that resolves id→ptr afterwards (the paint walk's descent,
+    /// propagate_event, the all_* child aggregation) then reads live widgets.
+    fn relink_tree(&mut self) {
+        let ctx = &mut self.ui_context;
+        focus::link_parent_child(&mut self.root_container, &mut self.card, ctx);
+        focus::link_parent_child(&mut self.root_container, &mut self.session_list, ctx);
+        focus::link_parent_child(&mut self.card, &mut self.username_box, ctx);
+        focus::link_parent_child(&mut self.card, &mut self.password_box, ctx);
+        focus::link_parent_child(&mut self.card, &mut self.login_btn, ctx);
+        focus::link_parent_child(&mut self.card, &mut self.status_lbl, ctx);
+        // Initial focus: new() only set the box's own flag; point the context at the live
+        // widget carrying it. Never fires once a runtime set_focused/clear_focus has run
+        // (clear_focus also clears both flags).
+        if self.ui_context.focused_widget.is_none() {
+            if self.username_box.base().is_some_and(|b| b.focused) {
+                self.ui_context.set_focused(&mut self.username_box);
+            } else if self.password_box.base().is_some_and(|b| b.focused) {
+                self.ui_context.set_focused(&mut self.password_box);
+            }
+        }
+    }
+
     #[allow(dead_code)]
     fn widgets_iter_mut(&mut self) -> Vec<&mut dyn Element> {
         vec![
@@ -580,22 +615,16 @@ impl cce_ui::engine::Application for State {
             auth_receiver: Some(auth_receiver),
         };
 
-        // Establish cce-ui parent-child widget tree hierarchy
-        let ctx = &mut app.ui_context;
-        focus::link_parent_child(&mut app.root_container, &mut app.card, ctx);
-        focus::link_parent_child(&mut app.root_container, &mut app.session_list, ctx);
-
-        focus::link_parent_child(&mut app.card, &mut app.username_box, ctx);
-        focus::link_parent_child(&mut app.card, &mut app.password_box, ctx);
-        focus::link_parent_child(&mut app.card, &mut app.login_btn, ctx);
-        focus::link_parent_child(&mut app.card, &mut app.status_lbl, ctx);
-
+        // The widget tree is NOT linked here: `app` is a stack local inside new(), so any
+        // pointer registered now (tree registry, ui_context.focused_widget) dangles the
+        // moment the State moves to its final address. relink_tree() registers the live
+        // addresses at the top of every frame instead. Only the widgets' own focus FLAGS
+        // (which move with the struct) are set here; relink_tree points focused_widget at
+        // the flagged box.
         let has_username = !app.username_box.text.trim().to_string().is_empty();
         if has_username {
-            app.ui_context.set_focused(&mut app.password_box);
             app.password_box.focus();
         } else {
-            app.ui_context.set_focused(&mut app.username_box);
             app.username_box.focus();
         }
 
@@ -636,6 +665,7 @@ impl cce_ui::engine::Application for State {
         // custom_vertices, appended on top exactly as before (it is the escape-hatch layer,
         // not part of the display-list geometry).
         use cce_ui::scene::layout::Rect;
+        self.relink_tree();
         if (self.width - size.width as f32).abs() > 0.001 || (self.height - size.height as f32).abs() > 0.001 || (self.scale - scale).abs() > 0.001 {
             self.width = size.width as f32;
             self.height = size.height as f32;
@@ -690,13 +720,13 @@ impl cce_ui::engine::Application for State {
             None,
             None,
         );
-        let mut widget_labels = Vec::new();
-        for w in self.widgets_iter() {
-            widget_labels.extend(w.text_labels());
-        }
-        for label in widget_labels {
-            pc.text_with(label.text, label.x, label.y, label.font_size, label.color, None, None);
-        }
+        // Widget text via the paint walk, over the TRUE roots: root_container descends into
+        // the card (whose paint_self override carries its header labels) and its input
+        // children, plus the session list; bg is a standalone leaf. Walking the flat
+        // widgets_iter would emit the card's children twice (once via descent, once as
+        // standalone roots).
+        cce_ui::scene::painter::append_widget_text(&self.ui_context, &self.bg, &mut pc);
+        cce_ui::scene::painter::append_widget_text(&self.ui_context, &self.root_container, &mut pc);
 
         Some(pc.finish())
     }
