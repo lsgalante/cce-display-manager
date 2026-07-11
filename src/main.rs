@@ -115,35 +115,13 @@ impl Element for LoginCard {
         vec![]
     }
 
-    fn text_labels(&self) -> Vec<TextLabel> {
-        let sw = self.base.w;
-        let sh = self.base.h;
-        let card_x = (sw - 360.0) / 2.0;
-        let card_y = (sh - 300.0) / 2.0;
-        vec![
-            TextLabel {
-                text: "CCE DISPLAY MANAGER".to_string(),
-                x: card_x + 30.0,
-                y: card_y + 30.0,
-                font_size: 15.0,
-                color: [0xee, 0xee, 0xf5],
-            },
-            TextLabel {
-                text: "Authenticate to begin your session".to_string(),
-                x: card_x + 30.0,
-                y: card_y + 50.0,
-                font_size: 11.0,
-                color: [0x83, 0x83, 0x8a],
-            },
-        ]
-    }
 
     fn paint_self(&self, _ui: &UiContext, ctx: &mut cce_ui::scene::paint::PaintCtx) {
         // A container with OWN (non-aggregating) labels: the default paint_self drops
         // container text — it assumes container text_labels aggregate children. Emit the
         // card's header labels here. Geometry intentionally stays out: the card plate is
         // drawn via custom_vertices (circular clip disabled), not the display list.
-        for tl in self.text_labels() {
+        for tl in self.own_labels() {
             ctx.text(tl.text, tl.x, tl.y, tl.font_size, tl.color);
         }
     }
@@ -163,6 +141,15 @@ impl StatusLabel {
 }
 
 impl Element for StatusLabel {
+    // Leaf legacy widget: own labels via paint_self (cce-ui's default no longer drains
+    // the text getters).
+    fn paint_self(&self, ui: &UiContext, ctx: &mut cce_ui::scene::paint::PaintCtx) {
+        cce_ui::scene::painter::paint_legacy_leaf(
+            self, ui, ctx,
+            cce_ui::scene::painter::fonted_leaf_labels(self, ui, self.own_labels()),
+        );
+    }
+
     fn base(&self) -> Option<&Widget> { Some(&self.base) }
     fn base_mut(&mut self) -> Option<&mut Widget> { Some(&mut self.base) }
     fn as_ptr(&self) -> *mut (dyn Element + 'static) {
@@ -173,20 +160,6 @@ impl Element for StatusLabel {
     }
     fn color(&self) -> [f32; 4] { [0.0, 0.0, 0.0, 0.0] } // Transparent background
 
-    fn text_labels(&self) -> Vec<TextLabel> {
-        let col = if self.is_error {
-            [0xee, 0x5c, 0x5c] // Soft red
-        } else {
-            [0x83, 0x83, 0x8a] // Dim text
-        };
-        vec![TextLabel {
-            text: self.text.clone(),
-            x: self.base.x,
-            y: self.base.y,
-            font_size: 11.0,
-            color: col,
-        }]
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +186,15 @@ impl SessionList {
 }
 
 impl Element for SessionList {
+    // Leaf legacy widget: own labels via paint_self (cce-ui's default no longer drains
+    // the text getters).
+    fn paint_self(&self, ui: &UiContext, ctx: &mut cce_ui::scene::paint::PaintCtx) {
+        cce_ui::scene::painter::paint_legacy_leaf(
+            self, ui, ctx,
+            cce_ui::scene::painter::fonted_leaf_labels(self, ui, self.own_labels()),
+        );
+    }
+
     fn base(&self) -> Option<&Widget> { Some(&self.base) }
     fn base_mut(&mut self) -> Option<&mut Widget> { Some(&mut self.base) }
     fn as_ptr(&self) -> *mut (dyn Element + 'static) {
@@ -252,45 +234,6 @@ impl Element for SessionList {
         quads
     }
 
-    fn text_labels(&self) -> Vec<TextLabel> {
-        let mut labels = Vec::new();
-        
-        // Header title
-        labels.push(TextLabel {
-            text: "SESSION MANAGER".to_string(),
-            x: self.base.x + 15.0,
-            y: self.base.y + 18.0,
-            font_size: 11.0,
-            color: [0x83, 0x83, 0x8a],
-        });
-        
-        // Session items
-        for (i, session) in self.sessions.iter().enumerate() {
-            let item_y = self.base.y + 40.0 + i as f32 * 36.0;
-            
-            let display_name = if session.name == "Bash Shell" {
-                "Bash Shell".to_string()
-            } else {
-                format!("{} ({})", session.name, if session.is_wayland { "Wayland" } else { "X11" })
-            };
-            
-            let color = if i == self.selected_idx {
-                [0xff, 0xff, 0xff]
-            } else {
-                [0xee, 0xee, 0xf5]
-            };
-            
-            labels.push(TextLabel {
-                text: display_name,
-                x: self.base.x + 20.0,
-                y: item_y + 10.0,
-                font_size: 12.0,
-                color,
-            });
-        }
-        
-        labels
-    }
 
     fn on_cursor_moved(&mut self, px: f32, py: f32, ctx: &mut UiContext) -> bool {
         let old_hovered = self.hovered_idx;
@@ -1542,5 +1485,89 @@ fn main() {
         run_greeter();
     } else {
         run_daemon();
+    }
+}
+
+impl LoginCard {
+    fn own_labels(&self) -> Vec<TextLabel> {
+        let sw = self.base.w;
+        let sh = self.base.h;
+        let card_x = (sw - 360.0) / 2.0;
+        let card_y = (sh - 300.0) / 2.0;
+        vec![
+            TextLabel {
+                text: "CCE DISPLAY MANAGER".to_string(),
+                x: card_x + 30.0,
+                y: card_y + 30.0,
+                font_size: 15.0,
+                color: [0xee, 0xee, 0xf5],
+            },
+            TextLabel {
+                text: "Authenticate to begin your session".to_string(),
+                x: card_x + 30.0,
+                y: card_y + 50.0,
+                font_size: 11.0,
+                color: [0x83, 0x83, 0x8a],
+            },
+        ]
+    }
+}
+
+impl StatusLabel {
+    fn own_labels(&self) -> Vec<TextLabel> {
+        let col = if self.is_error {
+            [0xee, 0x5c, 0x5c] // Soft red
+        } else {
+            [0x83, 0x83, 0x8a] // Dim text
+        };
+        vec![TextLabel {
+            text: self.text.clone(),
+            x: self.base.x,
+            y: self.base.y,
+            font_size: 11.0,
+            color: col,
+        }]
+    }
+}
+
+impl SessionList {
+    fn own_labels(&self) -> Vec<TextLabel> {
+        let mut labels = Vec::new();
+        
+        // Header title
+        labels.push(TextLabel {
+            text: "SESSION MANAGER".to_string(),
+            x: self.base.x + 15.0,
+            y: self.base.y + 18.0,
+            font_size: 11.0,
+            color: [0x83, 0x83, 0x8a],
+        });
+        
+        // Session items
+        for (i, session) in self.sessions.iter().enumerate() {
+            let item_y = self.base.y + 40.0 + i as f32 * 36.0;
+            
+            let display_name = if session.name == "Bash Shell" {
+                "Bash Shell".to_string()
+            } else {
+                format!("{} ({})", session.name, if session.is_wayland { "Wayland" } else { "X11" })
+            };
+            
+            let color = if i == self.selected_idx {
+                [0xff, 0xff, 0xff]
+            } else {
+                [0xee, 0xee, 0xf5]
+            };
+            
+            labels.push(TextLabel {
+                text: display_name,
+                x: self.base.x + 20.0,
+                y: item_y + 10.0,
+                font_size: 12.0,
+                color,
+            });
+        }
+        
+        labels
     }
 }
