@@ -1,5 +1,5 @@
 use cce_ui::widget::{
-    Button, ContentBg, Element, ElementState, MouseButton, Key, NamedKey, KeyEvent, TextBox,
+    Button, ContentBg, WidgetHost, ElementState, MouseButton, Key, NamedKey, KeyEvent, TextBox,
     focus, MouseScrollDelta
 };
 use wayland_client::QueueHandle;
@@ -10,7 +10,7 @@ use calloop::channel;
 
 
 
-fn widget_vertices(w: &dyn Element, sw: f32, sh: f32) -> Vec<Vertex> {
+fn widget_vertices(w: &dyn WidgetHost, sw: f32, sh: f32) -> Vec<Vertex> {
     let (x, y, ww, h) = w.rect();
     quad_vertices(x, y, ww, h, sw, sh, w.color()).to_vec()
 }
@@ -87,7 +87,7 @@ fn discover_sessions() -> Vec<Session> {
     sessions
 }
 
-// ── Custom LoginCard Container Element (narrow traits, wrapped in Adapted) ──
+// ── Custom LoginCard Container WidgetHost (narrow traits, wrapped in Adapted) ──
 #[derive(Debug, Clone)]
 struct LoginCard;
 
@@ -296,7 +296,7 @@ struct State {
 }
 
 impl State {
-    fn widgets_iter(&self) -> Vec<&dyn Element> {
+    fn widgets_iter(&self) -> Vec<&dyn WidgetHost> {
         vec![
             &self.bg,
             &self.card,
@@ -337,7 +337,7 @@ impl State {
     }
 
     #[allow(dead_code)]
-    fn widgets_iter_mut(&mut self) -> Vec<&mut dyn Element> {
+    fn widgets_iter_mut(&mut self) -> Vec<&mut dyn WidgetHost> {
         vec![
             &mut self.bg,
             &mut self.card,
