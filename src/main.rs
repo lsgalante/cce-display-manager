@@ -1,6 +1,6 @@
 use cce_ui::widget::{
     Button, ContentBg, TextLabel, Element, ElementState, MouseButton, Key, NamedKey, KeyEvent, TextBox,
-    Widget, Container, focus, MouseScrollDelta
+    Widget, focus, MouseScrollDelta
 };
 use cce_ui::context::UiContext;
 use wayland_client::QueueHandle;
@@ -282,7 +282,6 @@ struct State {
     status_lbl: StatusLabel,
     session_list: SessionList,
     ui_context: cce_ui::context::UiContext,
-    root_container: Container,
 
 
     cursor_x: f32,
@@ -323,8 +322,11 @@ impl State {
     /// propagate_event, the all_* child aggregation) then reads live widgets.
     fn relink_tree(&mut self) {
         let ctx = &mut self.ui_context;
-        focus::link_parent_child(&mut self.root_container, &mut self.card, ctx);
-        focus::link_parent_child(&mut self.root_container, &mut self.session_list, ctx);
+        // Root Container DISSOLVED (Phase 6ax): the card and the session list are the two
+        // dispatch/walk roots; register them directly (link_parent_child used to do it as a
+        // side effect of the root links).
+        ctx.register_widget(self.card.base.id(), self.card.as_ptr_mut());
+        ctx.register_widget(self.session_list.base.id(), self.session_list.as_ptr_mut());
         focus::link_parent_child(&mut self.card, &mut self.username_box, ctx);
         focus::link_parent_child(&mut self.card, &mut self.password_box, ctx);
         focus::link_parent_child(&mut self.card, &mut self.login_btn, ctx);
@@ -360,9 +362,6 @@ impl State {
 
         // Background spans the whole screen
         self.bg.set_rect(0.0, 0.0, sw, sh);
-
-        // Root container spans the whole screen
-        self.root_container.set_rect(0.0, 0.0, sw, sh);
 
         // Center card configuration
         let card_w = 360.0;
@@ -405,8 +404,12 @@ impl State {
             local_x: cx,
             local_y: cy,
         };
-        let root_ptr = self.root_container.as_ptr_mut();
-        if self.ui_context.propagate_event(&event, root_ptr) {
+        let sl_ptr = self.session_list.as_ptr_mut();
+        let card_ptr = self.card.as_ptr_mut();
+        if self.ui_context.propagate_event(&event, sl_ptr) {
+            changed = true;
+        }
+        if self.ui_context.propagate_event(&event, card_ptr) {
             changed = true;
         }
         changed
@@ -425,8 +428,10 @@ impl State {
             local_x: cx,
             local_y: cy,
         };
-        let root_ptr = self.root_container.as_ptr_mut();
-        let handled = self.ui_context.propagate_event(&event, root_ptr);
+        let sl_ptr = self.session_list.as_ptr_mut();
+        let card_ptr = self.card.as_ptr_mut();
+        let handled = self.ui_context.propagate_event(&event, sl_ptr)
+            || self.ui_context.propagate_event(&event, card_ptr);
         if button == MouseButton::Left && state == ElementState::Pressed {
             if !handled {
                 self.ui_context.clear_focus();
@@ -447,8 +452,11 @@ impl State {
             changed = true;
         }
         let ui_event = cce_ui::widget::Event::KeyInput(event.clone());
-        let root_ptr = self.root_container.as_ptr_mut();
-        if self.ui_context.propagate_event(&ui_event, root_ptr) {
+        let sl_ptr = self.session_list.as_ptr_mut();
+        let card_ptr = self.card.as_ptr_mut();
+        if self.ui_context.propagate_event(&ui_event, sl_ptr) {
+            changed = true;
+        } else if self.ui_context.propagate_event(&ui_event, card_ptr) {
             changed = true;
         }
         changed
@@ -543,7 +551,6 @@ impl cce_ui::engine::Application for State {
             status_lbl,
             session_list,
             ui_context: cce_ui::context::UiContext::new(),
-            root_container: Container::new(),
             cursor_x: 0.0,
             cursor_y: 0.0,
             width: 1024.0,
@@ -663,13 +670,13 @@ impl cce_ui::engine::Application for State {
             None,
             None,
         );
-        // Widget text via the paint walk, over the TRUE roots: root_container descends into
-        // the card (whose paint_self override carries its header labels) and its input
-        // children, plus the session list; bg is a standalone leaf. Walking the flat
-        // widgets_iter would emit the card's children twice (once via descent, once as
-        // standalone roots).
+        // Widget text via the paint walk, over the TRUE roots (root Container dissolved,
+        // Phase 6ax): the card descends into its input children via the walk; the session
+        // list and bg are standalone leaves. Walking the flat widgets_iter would emit the
+        // card's children twice (once via descent, once as standalone roots).
         cce_ui::scene::painter::append_widget_text(&self.ui_context, &self.bg, &mut pc);
-        cce_ui::scene::painter::append_widget_text(&self.ui_context, &self.root_container, &mut pc);
+        cce_ui::scene::painter::append_widget_text(&self.ui_context, &self.card, &mut pc);
+        cce_ui::scene::painter::append_widget_text(&self.ui_context, &self.session_list, &mut pc);
 
         Some(pc.finish())
     }
