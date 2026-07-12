@@ -1,8 +1,7 @@
 use cce_ui::widget::{
-    Button, ContentBg, TextLabel, Element, ElementState, MouseButton, Key, NamedKey, KeyEvent, TextBox,
-    Widget, focus, MouseScrollDelta
+    Button, ContentBg, Element, ElementState, MouseButton, Key, NamedKey, KeyEvent, TextBox,
+    focus, MouseScrollDelta
 };
-use cce_ui::context::UiContext;
 use wayland_client::QueueHandle;
 use cce_ui::engine::{EngineState, LogicalPosition, LogicalSize, WindowSettings, Vertex, quad_vertices};
 use calloop::channel;
@@ -88,199 +87,193 @@ fn discover_sessions() -> Vec<Session> {
     sessions
 }
 
-// ── Custom LoginCard Container Element ──
+// ── Custom LoginCard Container Element (narrow traits, wrapped in Adapted) ──
 #[derive(Debug, Clone)]
-struct LoginCard {
-    base: Widget,
-}
+struct LoginCard;
 
 impl LoginCard {
-    fn new() -> Self {
-        Self { base: Widget::new() }
+    fn new() -> cce_ui::widget::Adapted<LoginCard> {
+        cce_ui::widget::Adapted::new(LoginCard)
     }
 }
 
-impl Element for LoginCard {
-    fn base(&self) -> Option<&Widget> { Some(&self.base) }
-    fn base_mut(&mut self) -> Option<&mut Widget> { Some(&mut self.base) }
-    fn as_ptr(&self) -> *mut (dyn Element + 'static) {
-        self as *const Self as *mut Self as *mut (dyn Element + 'static)
-    }
-    fn as_ptr_mut(&mut self) -> *mut (dyn Element + 'static) {
-        self as *mut Self as *mut (dyn Element + 'static)
-    }
+impl cce_ui::widget::Layout for LoginCard {}
+
+impl cce_ui::widget::Paint for LoginCard {
     fn color(&self) -> [f32; 4] { [0.25, 0.25, 0.28, 0.75] } // Premium gray card background with transparency
 
-    fn extra_quads(&self) -> Vec<(f32, f32, f32, f32, [f32; 4])> {
-        vec![]
-    }
-
-
-    fn paint_self(&self, _ui: &UiContext, ctx: &mut cce_ui::scene::paint::PaintCtx) {
-        // A container with OWN (non-aggregating) labels: the default paint_self drops
-        // container text — it assumes container text_labels aggregate children. Emit the
-        // card's header labels here. Geometry intentionally stays out: the card plate is
-        // drawn via custom_vertices (circular clip disabled), not the display list.
-        for tl in self.own_labels() {
-            ctx.text(tl.text, tl.x, tl.y, tl.font_size, tl.color);
-        }
+    fn paint(&self, rect: cce_ui::scene::layout::Rect, pc: &mut cce_ui::scene::paint::PaintCtx) {
+        // Only the card's header labels: the card plate (soft radial-glow blob) is drawn
+        // via custom_vertices, not the display list — and the direct all_quads read in
+        // custom_vertices relies on this paint emitting NO plain quads, like the legacy
+        // empty extra_quads. The card is laid out full-screen; the header centers off it.
+        let card_x = (rect.width - 360.0) / 2.0;
+        let card_y = (rect.height - 300.0) / 2.0;
+        pc.text("CCE DISPLAY MANAGER".to_string(), card_x + 30.0, card_y + 30.0, 15.0, [0xee, 0xee, 0xf5]);
+        pc.text("Authenticate to begin your session".to_string(), card_x + 30.0, card_y + 50.0, 11.0, [0x83, 0x83, 0x8a]);
     }
 }
+
+impl cce_ui::widget::Input for LoginCard {}
 
 #[derive(Debug, Clone)]
 struct StatusLabel {
-    base: Widget,
     pub text: String,
     pub is_error: bool,
 }
 
 impl StatusLabel {
-    fn new(text: String) -> Self {
-        Self { base: Widget::new(), text, is_error: false }
+    fn new(text: String) -> cce_ui::widget::Adapted<StatusLabel> {
+        cce_ui::widget::Adapted::new(Self { text, is_error: false })
     }
 }
 
-impl Element for StatusLabel {
-    // Leaf legacy widget: own labels via paint_self (cce-ui's default no longer drains
-    // the text getters).
-    fn paint_self(&self, ui: &UiContext, ctx: &mut cce_ui::scene::paint::PaintCtx) {
-        cce_ui::scene::painter::paint_legacy_leaf(
-            self, ui, ctx,
-            cce_ui::scene::painter::fonted_leaf_labels(self, ui, self.own_labels()),
-        );
-    }
+impl cce_ui::widget::Layout for StatusLabel {}
 
-    fn base(&self) -> Option<&Widget> { Some(&self.base) }
-    fn base_mut(&mut self) -> Option<&mut Widget> { Some(&mut self.base) }
-    fn as_ptr(&self) -> *mut (dyn Element + 'static) {
-        self as *const Self as *mut Self as *mut (dyn Element + 'static)
-    }
-    fn as_ptr_mut(&mut self) -> *mut (dyn Element + 'static) {
-        self as *mut Self as *mut (dyn Element + 'static)
-    }
+impl cce_ui::widget::Paint for StatusLabel {
     fn color(&self) -> [f32; 4] { [0.0, 0.0, 0.0, 0.0] } // Transparent background
 
+    fn paint(&self, rect: cce_ui::scene::layout::Rect, pc: &mut cce_ui::scene::paint::PaintCtx) {
+        let col = if self.is_error {
+            [0xee, 0x5c, 0x5c] // Soft red
+        } else {
+            [0x83, 0x83, 0x8a] // Dim text
+        };
+        pc.text(self.text.clone(), rect.x, rect.y, 11.0, col);
+    }
 }
+
+impl cce_ui::widget::Input for StatusLabel {}
 
 #[derive(Debug, Clone)]
 struct SessionList {
-    base: Widget,
     sessions: Vec<Session>,
     selected_idx: usize,
     hovered_idx: Option<usize>,
 }
 
 impl SessionList {
-    fn new(sessions: Vec<Session>) -> Self {
-        Self {
-            base: Widget::new(),
+    fn new(sessions: Vec<Session>) -> cce_ui::widget::Adapted<SessionList> {
+        cce_ui::widget::Adapted::new(Self {
             sessions,
             selected_idx: 0,
             hovered_idx: None,
-        }
+        })
     }
 
     fn selected_session(&self) -> Option<&Session> {
         self.sessions.get(self.selected_idx)
     }
+
+    /// Row rect of item `i` within the laid-out panel rect (header is 40px tall).
+    fn item_rect(&self, rect: cce_ui::scene::layout::Rect, i: usize) -> (f32, f32, f32, f32) {
+        (rect.x + 10.0, rect.y + 40.0 + i as f32 * 36.0, rect.width - 20.0, 32.0)
+    }
 }
 
-impl Element for SessionList {
-    // Leaf legacy widget: own labels via paint_self (cce-ui's default no longer drains
-    // the text getters).
-    fn paint_self(&self, ui: &UiContext, ctx: &mut cce_ui::scene::paint::PaintCtx) {
-        cce_ui::scene::painter::paint_legacy_leaf(
-            self, ui, ctx,
-            cce_ui::scene::painter::fonted_leaf_labels(self, ui, self.own_labels()),
-        );
-    }
+impl cce_ui::widget::Layout for SessionList {}
 
-    fn base(&self) -> Option<&Widget> { Some(&self.base) }
-    fn base_mut(&mut self) -> Option<&mut Widget> { Some(&mut self.base) }
-    fn as_ptr(&self) -> *mut (dyn Element + 'static) {
-        self as *const Self as *mut Self as *mut (dyn Element + 'static)
-    }
-    fn as_ptr_mut(&mut self) -> *mut (dyn Element + 'static) {
-        self as *mut Self as *mut (dyn Element + 'static)
-    }
+impl cce_ui::widget::Paint for SessionList {
     fn color(&self) -> [f32; 4] { [0.07, 0.07, 0.10, 0.70] } // Semi-transparent sleek dark card background
 
-    fn extra_quads(&self) -> Vec<(f32, f32, f32, f32, [f32; 4])> {
-        let mut quads = Vec::new();
-        
-        // 1. Panel borders (subtle blue accent)
+    fn paint(&self, rect: cce_ui::scene::layout::Rect, pc: &mut cce_ui::scene::paint::PaintCtx) {
+        use cce_ui::scene::layout::Rect;
+        // The legacy panel never drew its base color through the display getters (no
+        // rounded corners, extra_quads only) — same here: borders, selection, hover.
         let border_color = [0.20, 0.40, 0.65, 0.5];
-        quads.push((self.base.x, self.base.y, self.base.w, 1.5, border_color)); // top
-        quads.push((self.base.x, self.base.y + self.base.h - 1.5, self.base.w, 1.5, border_color)); // bottom
-        quads.push((self.base.x, self.base.y, 1.5, self.base.h, border_color)); // left
-        quads.push((self.base.x + self.base.w - 1.5, self.base.y, 1.5, self.base.h, border_color)); // right
-        
-        let item_w = self.base.w - 20.0;
-        
-        // 2. Selected item background
+        pc.quad(Rect { x: rect.x, y: rect.y, width: rect.width, height: 1.5 }, border_color); // top
+        pc.quad(Rect { x: rect.x, y: rect.y + rect.height - 1.5, width: rect.width, height: 1.5 }, border_color); // bottom
+        pc.quad(Rect { x: rect.x, y: rect.y, width: 1.5, height: rect.height }, border_color); // left
+        pc.quad(Rect { x: rect.x + rect.width - 1.5, y: rect.y, width: 1.5, height: rect.height }, border_color); // right
+
+        let item_w = rect.width - 20.0;
+
+        // Selected item background
         let selected_color = [0.20, 0.40, 0.65, 0.8]; // Solid blue highlight
-        let sel_y = self.base.y + 40.0 + self.selected_idx as f32 * 36.0;
-        quads.push((self.base.x + 10.0, sel_y, item_w, 32.0, selected_color));
-        
-        // 3. Hovered item background
+        let sel_y = rect.y + 40.0 + self.selected_idx as f32 * 36.0;
+        pc.quad(Rect { x: rect.x + 10.0, y: sel_y, width: item_w, height: 32.0 }, selected_color);
+
+        // Hovered item background
         if let Some(h_idx) = self.hovered_idx {
             if h_idx != self.selected_idx && h_idx < self.sessions.len() {
                 let hover_color = [1.0, 1.0, 1.0, 0.06]; // Subtle white overlay
-                let h_y = self.base.y + 40.0 + h_idx as f32 * 36.0;
-                quads.push((self.base.x + 10.0, h_y, item_w, 32.0, hover_color));
+                let h_y = rect.y + 40.0 + h_idx as f32 * 36.0;
+                pc.quad(Rect { x: rect.x + 10.0, y: h_y, width: item_w, height: 32.0 }, hover_color);
             }
         }
-        
-        quads
+
+        // Header title + session rows
+        pc.text("SESSION MANAGER".to_string(), rect.x + 15.0, rect.y + 18.0, 11.0, [0x83, 0x83, 0x8a]);
+        for (i, session) in self.sessions.iter().enumerate() {
+            let item_y = rect.y + 40.0 + i as f32 * 36.0;
+            let display_name = if session.name == "Bash Shell" {
+                "Bash Shell".to_string()
+            } else {
+                format!("{} ({})", session.name, if session.is_wayland { "Wayland" } else { "X11" })
+            };
+            let color = if i == self.selected_idx {
+                [0xff, 0xff, 0xff]
+            } else {
+                [0xee, 0xee, 0xf5]
+            };
+            pc.text(display_name, rect.x + 20.0, item_y + 10.0, 12.0, color);
+        }
     }
+}
 
-
-    fn on_cursor_moved(&mut self, px: f32, py: f32, ctx: &mut UiContext) -> bool {
-        let old_hovered = self.hovered_idx;
-        self.hovered_idx = None;
-        if self.hit_test(px, py, ctx) {
-            let item_w = self.base.w - 20.0;
-            for i in 0..self.sessions.len() {
-                let item_y = self.base.y + 40.0 + i as f32 * 36.0;
-                let item_x = self.base.x + 10.0;
-                if px >= item_x && px <= item_x + item_w && py >= item_y && py <= item_y + 32.0 {
-                    self.hovered_idx = Some(i);
-                    break;
+impl cce_ui::widget::Input for SessionList {
+    fn on_event(&mut self, event: &cce_ui::widget::Event, ectx: &mut cce_ui::widget::EventCtx) -> bool {
+        match event {
+            // Hover row tracking — the legacy on_cursor_moved override, against the
+            // routed rect (a move outside the panel clears the hover, as before).
+            cce_ui::widget::Event::PointerMove { x, y, .. } => {
+                let old_hovered = self.hovered_idx;
+                self.hovered_idx = None;
+                let r = ectx.rect;
+                if *x >= r.x && *x <= r.x + r.width && *y >= r.y && *y <= r.y + r.height {
+                    for i in 0..self.sessions.len() {
+                        let (ix, iy, iw, ih) = self.item_rect(r, i);
+                        if *x >= ix && *x <= ix + iw && *y >= iy && *y <= iy + ih {
+                            self.hovered_idx = Some(i);
+                            break;
+                        }
+                    }
                 }
+                self.hovered_idx != old_hovered
             }
-        }
-        self.hovered_idx != old_hovered
-    }
-
-    fn mouse_input(&mut self, button: MouseButton, state: ElementState, px: f32, py: f32, ctx: &mut UiContext) -> bool {
-        if button == MouseButton::Left && state == ElementState::Pressed {
-            if self.hit_test(px, py, ctx) {
-                let item_w = self.base.w - 20.0;
+            // Presses arrive hit-gated to the panel rect; select the clicked row.
+            cce_ui::widget::Event::MouseButton {
+                button: MouseButton::Left,
+                state: ElementState::Pressed,
+                x,
+                y,
+                ..
+            } => {
                 for i in 0..self.sessions.len() {
-                    let item_y = self.base.y + 40.0 + i as f32 * 36.0;
-                    let item_x = self.base.x + 10.0;
-                    if px >= item_x && px <= item_x + item_w && py >= item_y && py <= item_y + 32.0 {
+                    let (ix, iy, iw, ih) = self.item_rect(ectx.rect, i);
+                    if *x >= ix && *x <= ix + iw && *y >= iy && *y <= iy + ih {
                         if self.selected_idx != i {
                             self.selected_idx = i;
                             return true;
                         }
                     }
                 }
+                false
             }
+            _ => false,
         }
-        false
     }
 }
 
 // ── App State and Renderer ──
 struct State {
     bg: cce_ui::widget::Adapted<ContentBg>,
-    card: LoginCard,
+    card: cce_ui::widget::Adapted<LoginCard>,
     username_box: cce_ui::widget::Adapted<TextBox>,
     password_box: cce_ui::widget::Adapted<TextBox>,
     login_btn: cce_ui::widget::Adapted<cce_ui::widget::Button>,
-    status_lbl: StatusLabel,
-    session_list: SessionList,
+    status_lbl: cce_ui::widget::Adapted<StatusLabel>,
+    session_list: cce_ui::widget::Adapted<SessionList>,
     ui_context: cce_ui::context::UiContext,
 
 
@@ -325,8 +318,8 @@ impl State {
         // Root Container DISSOLVED (Phase 6ax): the card and the session list are the two
         // dispatch/walk roots; register them directly (link_parent_child used to do it as a
         // side effect of the root links).
-        ctx.register_widget(self.card.base.id(), self.card.as_ptr_mut());
-        ctx.register_widget(self.session_list.base.id(), self.session_list.as_ptr_mut());
+        ctx.register_widget(self.card.id(), self.card.as_ptr_mut());
+        ctx.register_widget(self.session_list.id(), self.session_list.as_ptr_mut());
         focus::link_parent_child(&mut self.card, &mut self.username_box, ctx);
         focus::link_parent_child(&mut self.card, &mut self.password_box, ctx);
         focus::link_parent_child(&mut self.card, &mut self.login_btn, ctx);
@@ -628,7 +621,7 @@ impl cce_ui::engine::Application for State {
         let mut pc = cce_ui::scene::paint::PaintCtx::new();
 
         for w in self.widgets_iter() {
-            let is_card = w.base().map_or(false, |b| std::ptr::eq(b, &self.card.base));
+            let is_card = w.base().map_or(false, |b| b.id() == self.card.id());
             if is_card {
                 continue;
             }
@@ -643,7 +636,7 @@ impl cce_ui::engine::Application for State {
         }
 
         for w in self.widgets_iter() {
-            let is_card = w.base().map_or(false, |b| std::ptr::eq(b, &self.card.base));
+            let is_card = w.base().map_or(false, |b| b.id() == self.card.id());
             if is_card {
                 continue;
             }
@@ -1495,86 +1488,5 @@ fn main() {
     }
 }
 
-impl LoginCard {
-    fn own_labels(&self) -> Vec<TextLabel> {
-        let sw = self.base.w;
-        let sh = self.base.h;
-        let card_x = (sw - 360.0) / 2.0;
-        let card_y = (sh - 300.0) / 2.0;
-        vec![
-            TextLabel {
-                text: "CCE DISPLAY MANAGER".to_string(),
-                x: card_x + 30.0,
-                y: card_y + 30.0,
-                font_size: 15.0,
-                color: [0xee, 0xee, 0xf5],
-            },
-            TextLabel {
-                text: "Authenticate to begin your session".to_string(),
-                x: card_x + 30.0,
-                y: card_y + 50.0,
-                font_size: 11.0,
-                color: [0x83, 0x83, 0x8a],
-            },
-        ]
-    }
-}
 
-impl StatusLabel {
-    fn own_labels(&self) -> Vec<TextLabel> {
-        let col = if self.is_error {
-            [0xee, 0x5c, 0x5c] // Soft red
-        } else {
-            [0x83, 0x83, 0x8a] // Dim text
-        };
-        vec![TextLabel {
-            text: self.text.clone(),
-            x: self.base.x,
-            y: self.base.y,
-            font_size: 11.0,
-            color: col,
-        }]
-    }
-}
 
-impl SessionList {
-    fn own_labels(&self) -> Vec<TextLabel> {
-        let mut labels = Vec::new();
-        
-        // Header title
-        labels.push(TextLabel {
-            text: "SESSION MANAGER".to_string(),
-            x: self.base.x + 15.0,
-            y: self.base.y + 18.0,
-            font_size: 11.0,
-            color: [0x83, 0x83, 0x8a],
-        });
-        
-        // Session items
-        for (i, session) in self.sessions.iter().enumerate() {
-            let item_y = self.base.y + 40.0 + i as f32 * 36.0;
-            
-            let display_name = if session.name == "Bash Shell" {
-                "Bash Shell".to_string()
-            } else {
-                format!("{} ({})", session.name, if session.is_wayland { "Wayland" } else { "X11" })
-            };
-            
-            let color = if i == self.selected_idx {
-                [0xff, 0xff, 0xff]
-            } else {
-                [0xee, 0xee, 0xf5]
-            };
-            
-            labels.push(TextLabel {
-                text: display_name,
-                x: self.base.x + 20.0,
-                y: item_y + 10.0,
-                font_size: 12.0,
-                color,
-            });
-        }
-        
-        labels
-    }
-}
