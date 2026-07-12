@@ -328,9 +328,9 @@ impl State {
         // widget carrying it. Never fires once a runtime set_focused/clear_focus has run
         // (clear_focus also clears both flags).
         if self.ui_context.focused_widget.is_none() {
-            if self.username_box.base().is_some_and(|b| b.focused) {
+            if self.username_box.base().focused {
                 self.ui_context.set_focused(&mut self.username_box);
-            } else if self.password_box.base().is_some_and(|b| b.focused) {
+            } else if self.password_box.base().focused {
                 self.ui_context.set_focused(&mut self.password_box);
             }
         }
@@ -469,7 +469,7 @@ impl State {
                 self.status_lbl.text = "Scan finger to login or type password".to_string();
                 self.status_lbl.is_error = false;
                 self.is_authenticating = true;
-                self.login_btn.base_mut().unwrap().label = Some("Authenticating...".to_string());
+                self.login_btn.base_mut().label = Some("Authenticating...".to_string());
                 authenticate_user(self.auth_request_id, username, password, self.auth_sender.clone());
             } else {
                 self.status_lbl.text = "Password cannot be empty".to_string();
@@ -482,7 +482,7 @@ impl State {
             self.status_lbl.text = "Authenticating...".to_string();
             self.status_lbl.is_error = false;
             self.is_authenticating = true;
-            self.login_btn.base_mut().unwrap().label = Some("Authenticating...".to_string());
+            self.login_btn.base_mut().label = Some("Authenticating...".to_string());
             authenticate_user(self.auth_request_id, username, password, self.auth_sender.clone());
         }
     }
@@ -577,7 +577,7 @@ impl cce_ui::engine::Application for State {
             if is_fprint_enabled() {
                 app.auth_request_id += 1;
                 app.is_authenticating = true;
-                app.login_btn.base_mut().unwrap().label = Some("Authenticating...".to_string());
+                app.login_btn.base_mut().label = Some("Authenticating...".to_string());
                 app.status_lbl.text = "Scan finger to login or type password".to_string();
                 authenticate_user(app.auth_request_id, username, String::new(), app.auth_sender.clone());
             }
@@ -621,7 +621,7 @@ impl cce_ui::engine::Application for State {
         let mut pc = cce_ui::scene::paint::PaintCtx::new();
 
         for w in self.widgets_iter() {
-            let is_card = w.base().map_or(false, |b| b.id() == self.card.id());
+            let is_card = w.base().id() == self.card.id();
             if is_card {
                 continue;
             }
@@ -636,7 +636,7 @@ impl cce_ui::engine::Application for State {
         }
 
         for w in self.widgets_iter() {
-            let is_card = w.base().map_or(false, |b| b.id() == self.card.id());
+            let is_card = w.base().id() == self.card.id();
             if is_card {
                 continue;
             }
@@ -717,7 +717,7 @@ impl cce_ui::engine::Application for State {
                         match msg {
                             AuthEvent::Success { username, .. } => {
                                 app.is_authenticating = false;
-                                app.login_btn.base_mut().unwrap().label = Some("Log In".to_string());
+                                app.login_btn.base_mut().label = Some("Log In".to_string());
                                 app.status_lbl.text = format!("Welcome, {}!", username);
                                 app.status_lbl.is_error = false;
                                 app.login_success = true;
@@ -728,7 +728,7 @@ impl cce_ui::engine::Application for State {
                             }
                             AuthEvent::Failure { err_msg, .. } => {
                                 app.is_authenticating = false;
-                                app.login_btn.base_mut().unwrap().label = Some("Log In".to_string());
+                                app.login_btn.base_mut().label = Some("Log In".to_string());
                                 app.status_lbl.text = err_msg;
                                 app.status_lbl.is_error = true;
                                 app.password_box.text.clear();
@@ -817,7 +817,7 @@ impl cce_ui::engine::Application for State {
                     if is_typing {
                         self.auth_request_id += 1;
                         self.is_authenticating = false;
-                        self.login_btn.base_mut().unwrap().label = Some("Log In".to_string());
+                        self.login_btn.base_mut().label = Some("Log In".to_string());
                         self.status_lbl.text = "Enter password to start".to_string();
                         self.status_lbl.is_error = false;
                     } else {
