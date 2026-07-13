@@ -318,6 +318,7 @@ impl State {
         // Root Container DISSOLVED (Phase 6ax): the card and the session list are the two
         // dispatch/walk roots; register them directly (link_parent_child used to do it as a
         // side effect of the root links).
+        ctx.register_widget(self.bg.id(), self.bg.as_ptr_mut());
         ctx.register_widget(self.card.id(), self.card.as_ptr_mut());
         ctx.register_widget(self.session_list.id(), self.session_list.as_ptr_mut());
         focus::link_parent_child(&mut self.card, &mut self.username_box, ctx);
@@ -395,16 +396,16 @@ impl State {
             local_y: cy,
         };
         // Routed (6bd shrink): the background rides the same router as the other roots.
-        let bg_ptr = self.bg.as_ptr_mut();
-        if self.ui_context.propagate_event(&event, bg_ptr) {
+        let bg_root = self.bg.id();
+        if self.ui_context.propagate_event(&event, bg_root) {
             changed = true;
         }
-        let sl_ptr = self.session_list.as_ptr_mut();
-        let card_ptr = self.card.as_ptr_mut();
-        if self.ui_context.propagate_event(&event, sl_ptr) {
+        let sl_root = self.session_list.id();
+        let card_root = self.card.id();
+        if self.ui_context.propagate_event(&event, sl_root) {
             changed = true;
         }
-        if self.ui_context.propagate_event(&event, card_ptr) {
+        if self.ui_context.propagate_event(&event, card_root) {
             changed = true;
         }
         changed
@@ -422,14 +423,14 @@ impl State {
         };
         // Routed (6bd shrink); the bg result stays outside `handled` so the
         // unfocus-on-missed-press rule below keys on the session list + card only.
-        let bg_ptr = self.bg.as_ptr_mut();
-        if self.ui_context.propagate_event(&event, bg_ptr) {
+        let bg_root = self.bg.id();
+        if self.ui_context.propagate_event(&event, bg_root) {
             changed = true;
         }
-        let sl_ptr = self.session_list.as_ptr_mut();
-        let card_ptr = self.card.as_ptr_mut();
-        let handled = self.ui_context.propagate_event(&event, sl_ptr)
-            || self.ui_context.propagate_event(&event, card_ptr);
+        let sl_root = self.session_list.id();
+        let card_root = self.card.id();
+        let handled = self.ui_context.propagate_event(&event, sl_root)
+            || self.ui_context.propagate_event(&event, card_root);
         if button == MouseButton::Left && state == ElementState::Pressed {
             if !handled {
                 self.ui_context.clear_focus();
@@ -450,14 +451,14 @@ impl State {
         // Fully short-circuited (the 6ac rule): every propagate call delivers KeyInput
         // to the ctx-focused widget first, so a non-short-circuited chain would insert
         // a typed key once per root.
-        let bg_ptr = self.bg.as_ptr_mut();
-        let sl_ptr = self.session_list.as_ptr_mut();
-        let card_ptr = self.card.as_ptr_mut();
-        if self.ui_context.propagate_event(&ui_event, bg_ptr) {
+        let bg_root = self.bg.id();
+        let sl_root = self.session_list.id();
+        let card_root = self.card.id();
+        if self.ui_context.propagate_event(&ui_event, bg_root) {
             changed = true;
-        } else if self.ui_context.propagate_event(&ui_event, sl_ptr) {
+        } else if self.ui_context.propagate_event(&ui_event, sl_root) {
             changed = true;
-        } else if self.ui_context.propagate_event(&ui_event, card_ptr) {
+        } else if self.ui_context.propagate_event(&ui_event, card_root) {
             changed = true;
         }
         changed
@@ -872,14 +873,14 @@ impl cce_ui::engine::Application for State {
                 changed = true;
             } else if logical_key == &Key::Named(NamedKey::Enter) && self.password_box.focused(&self.ui_context) {
                 let kev = cce_ui::widget::Event::KeyInput(event.clone());
-                let ptr = self.password_box.as_ptr_mut();
-                let _ = self.ui_context.propagate_event(&kev, ptr);
+                let root = self.password_box.id();
+                let _ = self.ui_context.propagate_event(&kev, root);
                 self.trigger_auth();
                 changed = true;
             } else if logical_key == &Key::Named(NamedKey::Enter) && self.username_box.focused(&self.ui_context) {
                 let kev = cce_ui::widget::Event::KeyInput(event.clone());
-                let ptr = self.username_box.as_ptr_mut();
-                let _ = self.ui_context.propagate_event(&kev, ptr);
+                let root = self.username_box.id();
+                let _ = self.ui_context.propagate_event(&kev, root);
                 self.ui_context.set_focused(&mut self.password_box);
                 self.username_box.unfocus();
                 self.password_box.focus();
