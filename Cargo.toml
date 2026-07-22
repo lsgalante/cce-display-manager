@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 cce-ui = { path = "../cce-ui" }
 pam = "0.7.0"
+zbus = "5"
 pam-sys = "0.5.6"
 libc = "0.2"
 users = "0.8.1"

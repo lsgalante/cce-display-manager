@@ -1,0 +1,12 @@
+[Unit]
+Description=CCE keyring unlock request (KeePassXC)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/cce-keyring-unlock
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,13 @@
+[Unit]
+Description=CCE keyring unlock daemon (KeePassXC auto-unlock)
+Documentation=file:///usr/local/sbin/cce-keyring-unlockd
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/cce-keyring-unlockd
+Restart=on-failure
+RestartSec=2
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
