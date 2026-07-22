@@ -1259,6 +1259,12 @@ fn run_daemon() {
             .arg(exe_path)
             .arg("--greeter")
             .env("XDG_RUNTIME_DIR", &runtime_dir)
+            // The greeter runs as root: cce-ui's default bundled-fonts dir
+            // ($HOME/Dropbox/Fonts) doesn't exist for root, and an empty font
+            // db panics on the first shaped glyph. Point it at a system
+            // location and load installed system fonts as a fallback.
+            .env("CCE_FONTS_DIR", "/usr/share/fonts/cce")
+            .env("CCE_LOAD_SYSTEM_FONTS", "1")
             .env("LIBSEAT_BACKEND", "seatd")
             .env("WLR_DRM_NO_MODIFIERS", "1")
             .env("WLR_DRM_DEVICES", "/dev/dri/card1:/dev/dri/card0")
