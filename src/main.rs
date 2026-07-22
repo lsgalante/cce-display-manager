@@ -1156,7 +1156,6 @@ impl Drop for PamSession {
 }
 
 fn run_daemon() {
-    use users::os::unix::UserExt;
     let uid = users::get_current_uid();
     if uid != 0 {
         log::error!("Error: Daemon mode must be run as root (UID 0). Effective UID: {}", uid);
@@ -1218,7 +1217,21 @@ fn run_daemon() {
         }
     }
 
+    // Set when the compositor requested a restart (`ccectl restart-compositor`
+    // wrote the flag file and exited): the next loop iteration relaunches the
+    // same session directly — no greeter, autologin PAM service.
+    let mut pending_relaunch: Option<(String, String, bool)> = None;
+
     loop {
+        if let Some((username, exec, is_wayland)) = pending_relaunch.take() {
+            log::info!(
+                "Compositor restart requested: relaunching '{}' for {} without the greeter",
+                exec, username
+            );
+            launch_session(username, exec, is_wayland, String::new(), &tty_name, &mut pending_relaunch);
+            continue;
+        }
+
         if is_real_tty {
             log::info!("Waiting for {} to become the active TTY...", tty_name);
             loop {
@@ -1317,13 +1330,36 @@ fn run_daemon() {
                 }
             }
 
-            log::info!("Launching user session Exec: '{}' (Wayland: {}) for user: '{}'", exec, is_wayland, username);
-            
-            let pid = unsafe { libc::fork() };
-            if pid < 0 {
-                log::error!("Fork failed: {}", std::io::Error::last_os_error());
-                continue;
-            } else if pid == 0 {
+            launch_session(username, exec, is_wayland, password, &tty_name, &mut pending_relaunch);
+        }
+    }
+}
+
+/// Fork the session worker (PAM open_session + user-session spawn) and wait
+/// for it — shared by the greeter login path and the compositor-restart
+/// relaunch path. If the session left a restart flag (`ccectl
+/// restart-compositor` writes it before a clean exit), arm
+/// `pending_relaunch` so the daemon loop relaunches this same session
+/// directly, greeter skipped (empty password → the autologin PAM service).
+fn launch_session(
+    username: String,
+    exec: String,
+    is_wayland: bool,
+    password: String,
+    tty_name: &str,
+    pending_relaunch: &mut Option<(String, String, bool)>,
+) {
+    use users::os::unix::UserExt;
+    log::info!("Launching user session Exec: '{}' (Wayland: {}) for user: '{}'", exec, is_wayland, username);
+    // A stale flag from a previous session must not trigger a phantom relaunch.
+    let flag_path = format!("/tmp/cce-restart-requested-{}", username);
+    let _ = std::fs::remove_file(&flag_path);
+
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        log::error!("Fork failed: {}", std::io::Error::last_os_error());
+        return;
+    } else if pid == 0 {
                 // Child process: execute PAM session and spawn the compositor/user session
                 let user = match users::get_user_by_name(&username) {
                     Some(u) => u,
@@ -1469,21 +1505,33 @@ fn run_daemon() {
                 log::info!("User session ended.");
                 std::mem::drop(auth);
                 std::process::exit(0);
-            } else {
-                // Parent process: block until the session worker child terminates
-                let mut status: libc::c_int = 0;
-                unsafe {
-                    libc::waitpid(pid, &mut status, 0);
-                }
-                log::info!("Session worker child (PID {}) exited with status: {}", pid, status);
+    } else {
+        // Parent process: block until the session worker child terminates
+        let mut status: libc::c_int = 0;
+        unsafe {
+            libc::waitpid(pid, &mut status, 0);
+        }
+        log::info!("Session worker child (PID {}) exited with status: {}", pid, status);
 
-                if let Some(vt) = tty_name.strip_prefix("tty").and_then(|s| s.parse::<u32>().ok()) {
-                    log::info!("Switching back to VT {}...", vt);
-                    let _ = std::process::Command::new("chvt")
-                        .arg(vt.to_string())
-                        .status();
-                }
+        // Compositor-requested restart: honor the flag only when it is owned
+        // by the session user (anyone can create names in /tmp).
+        if let Ok(meta) = std::fs::metadata(&flag_path) {
+            use std::os::unix::fs::MetadataExt;
+            let owner_ok = users::get_user_by_name(&username)
+                .map_or(false, |u| u.uid() == meta.uid());
+            let _ = std::fs::remove_file(&flag_path);
+            if owner_ok {
+                *pending_relaunch = Some((username, exec, is_wayland));
+                return; // relaunching immediately — no VT switch back
             }
+            log::warn!("Ignoring restart flag {} with wrong owner", flag_path);
+        }
+
+        if let Some(vt) = tty_name.strip_prefix("tty").and_then(|s| s.parse::<u32>().ok()) {
+            log::info!("Switching back to VT {}...", vt);
+            let _ = std::process::Command::new("chvt")
+                .arg(vt.to_string())
+                .status();
         }
     }
 }
