@@ -974,6 +974,12 @@ fn run_greeter() {
     let layout_scale = sys_config.scale.unwrap_or(1.0);
     let cursor_size = (24.0 * layout_scale) as u32;
     std::env::set_var("XCURSOR_SIZE", cursor_size.to_string());
+    // cage reports a scale-1 output, so on a HiDPI panel the greeter would lay
+    // out in physical pixels (everything half-size). cce-ui's forced-scale mode
+    // scales layout/rendering by the system scale while keeping buffer_scale 1.
+    if layout_scale > 1.0 && std::env::var("CCE_FORCE_SCALE").is_err() {
+        std::env::set_var("CCE_FORCE_SCALE", layout_scale.to_string());
+    }
 
     cce_ui::engine::run::<State>();
 
@@ -1288,6 +1294,12 @@ fn run_daemon() {
                         let password = parts[4].to_string();
                         log::info!("[greeter-stdout] AUTH_SUCCESS|{}|{}|{}", username, exec, is_wayland);
                         auth_success = Some((username, exec, is_wayland, password));
+                        // Don't read to EOF: the greeter has already exited,
+                        // but cage can linger indefinitely after its child is
+                        // gone (observed wedged until a manual VT switch — the
+                        // "login hangs until Ctrl+Alt+F2" failure). Stop
+                        // reading and terminate it ourselves below.
+                        break;
                     }
                 } else {
                     log::info!("[greeter-stdout] {}", line_str);
@@ -1295,6 +1307,9 @@ fn run_daemon() {
             }
         }
 
+        if auth_success.is_some() {
+            terminate_greeter(&mut child);
+        }
         let status = child.wait().expect("failed to wait on child process");
         log::info!("Greeter session exited with status: {}", status);
 
@@ -1341,6 +1356,44 @@ fn run_daemon() {
     }
 }
 
+/// Ask the greeter's cage to exit, escalating to SIGKILL if it doesn't. Cage
+/// exiting cleanly releases the seat/VT via seatd (which cleans the VT up
+/// without switching away); a wedged cage would otherwise block the login
+/// handoff forever.
+fn terminate_greeter(child: &mut std::process::Child) {
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+    for _ in 0..30 {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
+    log::warn!("cage did not exit within 3s of SIGTERM; killing it");
+    let _ = child.kill();
+}
+
+/// The greeter/cage teardown (or a stray VT switch) can leave the session's VT
+/// inactive; a logind session on an inactive VT never activates, so the
+/// compositor sits DRM-paused on a black screen. Force the VT active before
+/// handing the seat to the user session.
+fn ensure_vt_active(tty_name: &str) {
+    let Some(vt) = tty_name.strip_prefix("tty").and_then(|s| s.parse::<u32>().ok()) else {
+        return;
+    };
+    for _ in 0..20 {
+        if let Ok(active) = std::fs::read_to_string("/sys/class/tty/tty0/active") {
+            if active.trim() == tty_name {
+                return;
+            }
+        }
+        let _ = std::process::Command::new("chvt").arg(vt.to_string()).status();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    log::warn!("could not make {} the active VT", tty_name);
+}
+
 /// Fork the session worker (PAM open_session + user-session spawn) and wait
 /// for it — shared by the greeter login path and the compositor-restart
 /// relaunch path. If the session left a restart flag (`ccectl
@@ -1360,6 +1413,8 @@ fn launch_session(
     // A stale flag from a previous session must not trigger a phantom relaunch.
     let flag_path = format!("/tmp/cce-restart-requested-{}", username);
     let _ = std::fs::remove_file(&flag_path);
+
+    ensure_vt_active(tty_name);
 
     let pid = unsafe { libc::fork() };
     if pid < 0 {
