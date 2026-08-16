@@ -23,6 +23,42 @@ const OPEN_ATTEMPTS: u32 = 4;
 const VERIFY_WINDOW: Duration = Duration::from_secs(12);
 const NAME_WAIT: Duration = Duration::from_secs(30);
 const READY_WAIT: Duration = Duration::from_secs(20);
+/// Ceiling on one request, kept under the client's 120 s read timeout so the
+/// client hears a verdict instead of timing out and retrying into a daemon
+/// that is still working on the previous attempt.
+const REQUEST_BUDGET: Duration = Duration::from_secs(100);
+/// Per-call ceilings. No D-Bus call here is safe to wait on forever: see
+/// [`with_timeout`].
+const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+const PROP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Run one D-Bus call on a helper thread and give up on it after `timeout`.
+///
+/// `openDatabase` does not return while KeePassXC is showing its own modal
+/// unlock prompt, and a suspend inside that window stretches the call across
+/// the entire sleep — one such call once blocked this daemon for nine and a
+/// half hours, and every later request with it. Threading whole requests is
+/// not an option (`connect_user_bus` swaps euid, which is process-wide on
+/// Linux), so each call is bounded instead. A timed-out helper is abandoned
+/// rather than killed: it owns its own connection and exits if the call ever
+/// returns.
+fn with_timeout<T: Send + 'static>(
+    label: &str,
+    timeout: Duration,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(timeout)
+        .map_err(|_| format!("{label} did not return within {timeout:?}"))
+}
+
+/// Remaining slice of a deadline, or None once it has passed.
+fn remaining(deadline: std::time::Instant) -> Option<Duration> {
+    deadline.checked_duration_since(std::time::Instant::now())
+}
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -94,17 +130,19 @@ fn unlock_for(uid: u32, gid: u32) -> Result<(), Box<dyn std::error::Error>> {
     if entries.is_empty() {
         return Err(format!("no databases registered for uid {uid} (run cce-keyring-unlock-setup)").into());
     }
+    let budget = std::time::Instant::now() + REQUEST_BUDGET;
 
     let conn = connect_user_bus(uid, gid)?;
 
-    if !wait_for_name(&conn, KEEPASSXC_DBUS_NAME, NAME_WAIT) {
+    let name_wait = remaining(budget).unwrap_or_default().min(NAME_WAIT);
+    if !wait_for_name(&conn, KEEPASSXC_DBUS_NAME, name_wait) {
         return Err("KeePassXC never appeared on the session bus".into());
     }
     verify_keepassxc_owner(&conn, uid)?;
 
     // Don't fire openDatabase into a bootstrapping KeePassXC — wait until it
     // answers method calls.
-    let ready_deadline = std::time::Instant::now() + READY_WAIT;
+    let ready_deadline = (std::time::Instant::now() + READY_WAIT).min(budget);
     while !keepassxc_answers(&conn) {
         if std::time::Instant::now() >= ready_deadline {
             return Err("KeePassXC owns its D-Bus name but never answered a call".into());
@@ -114,7 +152,7 @@ fn unlock_for(uid: u32, gid: u32) -> Result<(), Box<dyn std::error::Error>> {
 
     for entry in &entries {
         let mut password = decrypt_password(entry)?;
-        let result = open_and_verify(&conn, entry, &password);
+        let result = open_and_verify(&conn, entry, &password, budget);
         zeroize(&mut password);
         result?;
     }
@@ -195,32 +233,66 @@ fn open_and_verify(
     conn: &zbus::blocking::Connection,
     entry: &DbEntry,
     password: &str,
+    budget: std::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut last_err: String = "unlock not confirmed".into();
     for attempt in 1..=OPEN_ATTEMPTS {
-        if let Err(e) = conn.call_method(
-            Some(KEEPASSXC_DBUS_NAME),
-            KEEPASSXC_DBUS_PATH,
-            Some(KEEPASSXC_DBUS_NAME),
-            "openDatabase",
-            &(entry.database.as_str(), password, entry.keyfile.as_str()),
-        ) {
-            last_err = format!("openDatabase call failed: {e}");
-            std::thread::sleep(Duration::from_secs(2));
-            continue;
+        if remaining(budget).is_none() {
+            break;
+        }
+        let call = {
+            let conn = conn.clone();
+            let database = entry.database.clone();
+            let keyfile = entry.keyfile.clone();
+            let mut password = password.to_string();
+            with_timeout("openDatabase", OPEN_TIMEOUT, move || {
+                let r = conn
+                    .call_method(
+                        Some(KEEPASSXC_DBUS_NAME),
+                        KEEPASSXC_DBUS_PATH,
+                        Some(KEEPASSXC_DBUS_NAME),
+                        "openDatabase",
+                        &(database.as_str(), password.as_str(), keyfile.as_str()),
+                    )
+                    .map(|_| ())
+                    .map_err(|e| e.to_string());
+                zeroize(&mut password);
+                r
+            })
+        };
+        match call {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                last_err = format!("openDatabase call failed: {e}");
+                std::thread::sleep(Duration::from_secs(2));
+                continue;
+            }
+            Err(e) => {
+                // KeePassXC is most likely sitting on its own modal prompt.
+                last_err = e;
+                log::warn!("{}: {last_err}", entry.database);
+                continue;
+            }
         }
         // The call returning success is not enough — confirm via the Secret
         // Service that the collection really is unlocked.
-        let deadline = std::time::Instant::now() + VERIFY_WINDOW;
+        let deadline = (std::time::Instant::now() + VERIFY_WINDOW).min(budget);
         let mut secrets_seen = false;
         while std::time::Instant::now() < deadline {
-            match default_collection_locked(conn) {
-                Ok(false) => {
+            let locked = {
+                let conn = conn.clone();
+                with_timeout("Locked property read", PROP_TIMEOUT, move || {
+                    default_collection_locked(&conn).map_err(|e| e.to_string())
+                })
+            };
+            match locked {
+                Ok(Ok(false)) => {
                     log::info!("{}: unlocked (attempt {attempt})", entry.database);
                     return Ok(());
                 }
-                Ok(true) => secrets_seen = true,
-                Err(_) => {} // secrets service not up yet
+                Ok(Ok(true)) => secrets_seen = true,
+                Ok(Err(_)) => {}  // secrets service not up yet
+                Err(e) => log::warn!("{}: {e}", entry.database),
             }
             std::thread::sleep(Duration::from_millis(750));
         }

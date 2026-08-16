@@ -1,0 +1,16 @@
+[Unit]
+Description=KeePassXC (Secret Service provider for the cce session)
+Documentation=man:keepassxc(1)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/keepassxc
+# The provider every keyring client waits on: bring it straight back if it
+# dies rather than leaving the session without a Secret Service.
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

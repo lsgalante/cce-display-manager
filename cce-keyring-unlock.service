@@ -1,6 +1,9 @@
 [Unit]
 Description=CCE keyring unlock request (KeePassXC)
-After=graphical-session.target
+# Ordered after the provider: an openDatabase sent while KeePassXC is still
+# bootstrapping is accepted and silently lost.
+After=graphical-session.target cce-keepassxc.service
+Wants=cce-keepassxc.service
 PartOf=graphical-session.target
 
 [Service]
