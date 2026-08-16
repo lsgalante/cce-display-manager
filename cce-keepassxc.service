@@ -7,6 +7,17 @@ PartOf=graphical-session.target
 [Service]
 Type=simple
 ExecStart=/usr/bin/keepassxc
+# A restarted KeePassXC comes back with the database LOCKED, and
+# cce-keyring-unlock.service is a login-time oneshot that has long since run —
+# so unlock here too, on every start. At login this just does the same work
+# marginally earlier and that unit then no-ops.
+#
+# Bounded deliberately: ExecStartPost counts against TimeoutStartSec (90s by
+# default here), and overrunning it makes systemd fail the start and kill the
+# whole unit — KeePassXC with it — which Restart=on-failure would then loop.
+# 45s clears the ~3s warm unlock with room to spare. Leading `-`: a failed
+# unlock must never take KeePassXC down with it.
+ExecStartPost=-/usr/bin/timeout 45 %h/.local/bin/cce-keyring-unlock
 # The provider every keyring client waits on: bring it straight back if it
 # dies rather than leaving the session without a Secret Service.
 Restart=on-failure
