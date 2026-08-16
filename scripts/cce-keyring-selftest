@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# cce-keyring-selftest — did this login's keyring chain work?
+#
+# Written 2026-08-16 alongside the login-race fix (cce@9d454c4,
+# cce-display-manager@d7cc6ec/17bfb9d). Run it after logging in. Everything it
+# reads is durable (journal + /tmp/cce.log), so it is fine to run much later.
+
+pass=0 fail=0
+ok()   { printf '  \033[32mPASS\033[0m  %s\n' "$1"; pass=$((pass+1)); }
+bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; fail=$((fail+1)); }
+info() { printf '        %s\n' "$1"; }
+
+# Everything must be scoped to THIS login, not `journalctl -b`: one boot spans
+# many sessions here (the machine stays up for days), and boot-wide counts made
+# a healthy login look like 32 failed claude-desktop launches.
+#
+# Find the compositor by /proc/<pid>/exe basename, never comm or a pgrep
+# pattern: it is launched through the `cce` symlink, so its comm is "cce", but
+# a `make run` leftover has comm "cce-fx".
+compositor_pid() {
+    local p exe
+    for p in /proc/[0-9]*; do
+        exe=$(readlink "$p/exe" 2>/dev/null) || continue
+        exe=${exe% (deleted)}
+        [ "${exe##*/}" = cce-fx ] && { printf '%s\n' "${p#/proc/}"; return 0; }
+    done
+    return 1
+}
+
+if cce_pid=$(compositor_pid); then
+    SINCE=$(date -d "$(ps -o lstart= -p "$cce_pid")" '+%Y-%m-%d %H:%M:%S')
+else
+    SINCE=$(date -d '-10 minutes' '+%Y-%m-%d %H:%M:%S')
+fi
+jl() { journalctl --since "$SINCE" --no-pager "$@" 2>/dev/null; }
+
+echo "cce keyring self-test — session (compositor) started $SINCE"
+echo
+
+# 1. Is the Secret Service actually open right now?
+locked=$(busctl --user get-property org.freedesktop.secrets \
+    /org/freedesktop/secrets/aliases/default \
+    org.freedesktop.Secret.Collection Locked 2>/dev/null)
+[ "$locked" = "b false" ] && ok "keyring is unlocked" || bad "keyring is ${locked:-unreachable}"
+
+# 2. Did KeePassXC come up from its own unit rather than session restore?
+if systemctl --user is-active --quiet cce-keepassxc.service; then
+    ok "cce-keepassxc.service active"
+else
+    bad "cce-keepassxc.service not active"
+fi
+
+# 3. Unlock latency: KeePassXC start -> daemon confirmed. Was 46s pre-fix.
+uline=$(jl -u cce-keyring-unlockd.service | grep 'unlocked and verified' | tail -1)
+if [ -n "$uline" ]; then
+    # InactiveExit, not ActiveEnter: ExecStartPost does the unlocking, so the
+    # unit only reaches "active" AFTER the unlock — measuring from ActiveEnter
+    # reports a negative latency.
+    kstart=$(systemctl --user show cce-keepassxc.service -p InactiveExitTimestamp --value)
+    utime=$(printf '%s\n' "$uline" | awk '{print $1, $2, $3}')
+    if [ -n "$kstart" ]; then
+        secs=$(( $(date -d "$utime" +%s) - $(date -d "$(printf '%s' "$kstart" | cut -d' ' -f2-3)" +%s) ))
+        info "unlocked ${secs}s after KeePassXC started (was 46s before the fix)"
+    fi
+    ok "keyring unlock confirmed this session"
+else
+    bad "no successful unlock recorded this session"
+fi
+
+# 4. Did the compositor barrier engage, and for how long?
+bline=$(grep -h -E 'Keyring (unlocked after|still locked)|No Secret Service' /tmp/cce.log 2>/dev/null | tail -1)
+case "$bline" in
+    *"Keyring unlocked after"*) ok "barrier released: ${bline##*] }" ;;
+    *"still locked"*)           bad "barrier hit its timeout: ${bline##*] }" ;;
+    *"No Secret Service"*)      bad "no Secret Service seen: ${bline##*] }" ;;
+    *) info "no barrier line in /tmp/cce.log (no gated app restored?)" ;;
+esac
+
+# 5. The actual question: is claude-desktop alive and loaded? The failing one
+#    died at 73MB; a working one is hundreds of MB.
+mainpid=$(pgrep -f 'claude-desktop --password-store' | head -1)
+if [ -n "$mainpid" ]; then
+    rss=$(awk '/VmRSS/{print $2}' "/proc/$mainpid/status" 2>/dev/null)
+    rssmb=$(( ${rss:-0} / 1024 ))
+    if [ "$rssmb" -gt 300 ]; then
+        ok "claude-desktop running and loaded (${rssmb}MB, pid $mainpid)"
+    else
+        bad "claude-desktop running but only ${rssmb}MB — may be stalled on the keyring"
+    fi
+else
+    bad "claude-desktop not running"
+fi
+
+# 6. Did it need a relaunch? More than one launch this session = the restored
+#    one died and had to be started again by hand — the original symptom.
+scopes=$(jl --user | grep -c 'Started app-claude-desktop-.*\.scope')
+if [ "$scopes" -le 1 ]; then
+    ok "claude-desktop started once this session ($scopes launch)"
+else
+    bad "claude-desktop launched $scopes times this session — first attempt(s) died"
+fi
+
+echo
+printf '%d passed, %d failed\n' "$pass" "$fail"
+[ "$fail" -eq 0 ]
