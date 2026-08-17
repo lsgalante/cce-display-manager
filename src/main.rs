@@ -292,7 +292,11 @@ struct State {
     auth_request_id: u64,
     auth_sender: channel::Sender<AuthEvent>,
     auth_receiver: Option<channel::Channel<AuthEvent>>,
-
+    // The fingerprint attempt runs in a helper *process* (`--fprint-auth`),
+    // not a thread: pam_authenticate blocks inside pam_fprintd and cannot be
+    // interrupted, but a process can be killed — and killing it drops its
+    // D-Bus connection, which is what makes fprintd release the sensor claim.
+    fprint_child: Option<std::process::Child>,
 }
 
 impl State {
@@ -474,12 +478,7 @@ impl State {
             self.username_box.focus();
         } else if password.is_empty() {
             if is_fprint_enabled() {
-                self.auth_request_id += 1;
-                self.status_lbl.text = "Scan finger to login or type password".to_string();
-                self.status_lbl.is_error = false;
-                self.is_authenticating = true;
-                self.login_btn.base_mut().label = Some("Authenticating...".to_string());
-                authenticate_user(self.auth_request_id, username, password, self.auth_sender.clone());
+                self.start_fprint_auth();
             } else {
                 self.status_lbl.text = "Password cannot be empty".to_string();
                 self.status_lbl.is_error = true;
@@ -487,12 +486,47 @@ impl State {
                 self.password_box.focus();
             }
         } else {
+            // A typed password supersedes any fingerprint attempt still
+            // running; release the sensor so it is not left claimed.
+            self.cancel_fprint_auth();
             self.auth_request_id += 1;
             self.status_lbl.text = "Authenticating...".to_string();
             self.status_lbl.is_error = false;
             self.is_authenticating = true;
             self.login_btn.base_mut().label = Some("Authenticating...".to_string());
             authenticate_user(self.auth_request_id, username, password, self.auth_sender.clone());
+        }
+    }
+
+    /// Start (or restart) the fingerprint attempt for the username in the box.
+    fn start_fprint_auth(&mut self) {
+        let username = self.username_box.text.trim().to_string();
+        self.cancel_fprint_auth();
+        self.auth_request_id += 1;
+        self.status_lbl.text = "Scan finger to login or type password".to_string();
+        self.status_lbl.is_error = false;
+        self.is_authenticating = true;
+        self.login_btn.base_mut().label = Some("Authenticating...".to_string());
+        match spawn_fprint_helper(self.auth_request_id, &username, self.auth_sender.clone()) {
+            Ok(child) => self.fprint_child = Some(child),
+            Err(e) => {
+                log::error!("Failed to spawn fingerprint helper: {}", e);
+                self.is_authenticating = false;
+                self.login_btn.base_mut().label = Some("Log In".to_string());
+                self.status_lbl.text = "Fingerprint unavailable — type password".to_string();
+                self.status_lbl.is_error = true;
+            }
+        }
+    }
+
+    /// Kill a running fingerprint helper, if any. Its exit drops the D-Bus
+    /// connection pam_fprintd used to claim the sensor, so fprintd releases the
+    /// device for the next attempt. Any late events it already queued are
+    /// dropped by the request-id check in the auth event handler.
+    fn cancel_fprint_auth(&mut self) {
+        if let Some(mut child) = self.fprint_child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 }
@@ -565,6 +599,7 @@ impl cce_ui::engine::Application for State {
             auth_request_id: 0,
             auth_sender,
             auth_receiver: Some(auth_receiver),
+            fprint_child: None,
         };
 
         // The widget tree is NOT linked here: `app` is a stack local inside new(), so any
@@ -580,15 +615,22 @@ impl cce_ui::engine::Application for State {
             app.username_box.focus();
         }
 
-        // Start background fingerprint/empty-password authentication if username is prepopulated and fprintd is enabled!
+        // Start the background fingerprint attempt if the username is
+        // prepopulated and fprintd is enabled — unless this greeter is a rapid
+        // respawn of one that just did the same. The daemon relaunches the
+        // greeter whenever it exits without AUTH_SUCCESS (crash, F5, Ctrl+C),
+        // and every relaunch used to fire a fresh fingerprint attempt on its
+        // own: three respawns in 90s were three attempts nobody asked for.
+        // After a respawn the user starts it explicitly (Enter on an empty
+        // password box).
         let username = app.username_box.text.trim().to_string();
-        if !username.is_empty() {
-            if is_fprint_enabled() {
-                app.auth_request_id += 1;
-                app.is_authenticating = true;
-                app.login_btn.base_mut().label = Some("Authenticating...".to_string());
-                app.status_lbl.text = "Scan finger to login or type password".to_string();
-                authenticate_user(app.auth_request_id, username, String::new(), app.auth_sender.clone());
+        if !username.is_empty() && is_fprint_enabled() {
+            if fprint_autostart_recently() {
+                log::info!("Greeter respawned within {}s of the last fingerprint auto-start; not auto-starting", FPRINT_AUTOSTART_COOLDOWN.as_secs());
+                app.status_lbl.text = "Press Enter to scan finger, or type password".to_string();
+            } else {
+                mark_fprint_autostart();
+                app.start_fprint_auth();
             }
         }
 
@@ -725,6 +767,7 @@ impl cce_ui::engine::Application for State {
 
                         match msg {
                             AuthEvent::Success { username, .. } => {
+                                app.fprint_child = None;
                                 app.is_authenticating = false;
                                 app.login_btn.base_mut().label = Some("Log In".to_string());
                                 app.status_lbl.text = format!("Welcome, {}!", username);
@@ -736,6 +779,9 @@ impl cce_ui::engine::Application for State {
                                 }
                             }
                             AuthEvent::Failure { err_msg, .. } => {
+                                if let Some(mut child) = app.fprint_child.take() {
+                                    let _ = child.wait();
+                                }
                                 app.is_authenticating = false;
                                 app.login_btn.base_mut().label = Some("Log In".to_string());
                                 app.status_lbl.text = err_msg;
@@ -824,6 +870,7 @@ impl cce_ui::engine::Application for State {
                         _ => false,
                     };
                     if is_typing {
+                        self.cancel_fprint_auth();
                         self.auth_request_id += 1;
                         self.is_authenticating = false;
                         self.login_btn.base_mut().label = Some("Log In".to_string());
@@ -911,8 +958,39 @@ enum AuthEvent {
     Info { request_id: u64, msg: String },
 }
 
+/// PAM service for the fingerprint attempt. It must be fingerprint-ONLY
+/// (`auth requisite pam_fprintd.so`, no system-local-login include in the auth
+/// stack): the old layout had pam_fprintd `sufficient` above the include, so a
+/// miss fell through into pam_unix with an empty password — one pam_faillock
+/// strike per miss, and after three the correct password was rejected too.
+const FPRINT_PAM_SERVICE: &str = "cce-display-manager-fprint";
+const PASSWORD_PAM_SERVICE: &str = "cce-display-manager-password";
+
+/// A greeter that starts within this window of the previous auto-start is a
+/// respawn; it does not auto-start the fingerprint attempt again.
+const FPRINT_AUTOSTART_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(20);
+const FPRINT_AUTOSTART_STAMP: &str = "/run/cce-display-manager/fprint-autostart";
+
+fn fprint_autostart_recently() -> bool {
+    std::fs::metadata(FPRINT_AUTOSTART_STAMP)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+        .map(|age| age < FPRINT_AUTOSTART_COOLDOWN)
+        .unwrap_or(false)
+}
+
+fn mark_fprint_autostart() {
+    if let Some(dir) = std::path::Path::new(FPRINT_AUTOSTART_STAMP).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(e) = std::fs::write(FPRINT_AUTOSTART_STAMP, b"") {
+        log::warn!("Could not write {}: {}", FPRINT_AUTOSTART_STAMP, e);
+    }
+}
+
 fn is_fprint_enabled() -> bool {
-    std::fs::read_to_string("/etc/pam.d/cce-display-manager")
+    std::fs::read_to_string(format!("/etc/pam.d/{}", FPRINT_PAM_SERVICE))
         .map(|content| {
             content.lines().any(|line| {
                 let trimmed = line.trim();
@@ -922,14 +1000,13 @@ fn is_fprint_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Password authentication, in a thread. Fingerprint goes through
+/// `spawn_fprint_helper` instead — never call this with an empty password.
 fn authenticate_user(request_id: u64, username: String, password: String, sender: channel::Sender<AuthEvent>) {
+    debug_assert!(!password.is_empty(), "empty password must go through the fingerprint helper");
     std::thread::spawn(move || {
-        let service = if password.is_empty() {
-            "cce-display-manager"
-        } else {
-            "cce-display-manager-password"
-        };
-        
+        let service = PASSWORD_PAM_SERVICE;
+
         let mut auth = match PamSession::new(service, &username, &password, request_id, Some(sender.clone())) {
             Ok(a) => a,
             Err(e) => {
@@ -950,6 +1027,100 @@ fn authenticate_user(request_id: u64, username: String, password: String, sender
 
         let _ = sender.send(AuthEvent::Success { request_id, username });
     });
+}
+
+/// Line protocol between the greeter and its `--fprint-auth` helper (on the
+/// helper's stdout — which is a pipe to the greeter, NOT the greeter's own
+/// stdout, which carries AUTH_SUCCESS to the daemon).
+const FPRINT_LINE_INFO: &str = "INFO|";
+const FPRINT_LINE_OK: &str = "OK";
+const FPRINT_LINE_FAIL: &str = "FAIL|";
+
+/// Spawn `<self> --fprint-auth <user>` and forward its result lines as
+/// AuthEvents tagged with `request_id`. The helper is bound to the greeter with
+/// PR_SET_PDEATHSIG so a crashed or respawned greeter cannot leave it running
+/// with the sensor claimed (that "Device was already claimed" state made every
+/// later attempt fail instantly).
+fn spawn_fprint_helper(request_id: u64, username: &str, sender: channel::Sender<AuthEvent>) -> std::io::Result<std::process::Child> {
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/cce-display-manager"));
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--fprint-auth")
+        .arg(username)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit());
+    unsafe {
+        cmd.pre_exec(|| {
+            // Runs in the child between fork and exec; PDEATHSIG survives exec.
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // Parent already gone (raced between fork and prctl)? Then die now.
+            if libc::getppid() == 1 {
+                libc::_exit(1);
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn()?;
+    let stdout = child.stdout.take().expect("piped stdout");
+    let username = username.to_string();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        let mut concluded = false;
+        for line in std::io::BufReader::new(stdout).lines() {
+            let line = match line { Ok(l) => l, Err(_) => break };
+            if let Some(msg) = line.strip_prefix(FPRINT_LINE_INFO) {
+                let _ = sender.send(AuthEvent::Info { request_id, msg: msg.to_string() });
+            } else if line == FPRINT_LINE_OK {
+                concluded = true;
+                let _ = sender.send(AuthEvent::Success { request_id, username: username.clone() });
+            } else if let Some(msg) = line.strip_prefix(FPRINT_LINE_FAIL) {
+                concluded = true;
+                let _ = sender.send(AuthEvent::Failure { request_id, err_msg: msg.to_string() });
+            }
+        }
+        if !concluded {
+            // EOF without a verdict: killed (cancelled) or crashed. A cancel
+            // has already bumped auth_request_id, so this is dropped there.
+            let _ = sender.send(AuthEvent::Failure { request_id, err_msg: "Fingerprint helper exited".to_string() });
+        }
+    });
+    Ok(child)
+}
+
+/// `--fprint-auth <user>`: run the fingerprint-only PAM service to a verdict
+/// and report it on stdout. Authenticate + account check only — the greeter
+/// prints AUTH_SUCCESS with an empty password and the daemon opens the real
+/// session on cce-display-manager-autologin, so opening one here would just
+/// register a throwaway logind session under cage.
+fn run_fprint_helper(username: &str) -> ! {
+    use std::io::Write;
+    let (sender, receiver) = channel::channel::<AuthEvent>();
+    let user = username.to_string();
+    let worker = std::thread::spawn(move || {
+        let mut auth = PamSession::new(FPRINT_PAM_SERVICE, &user, "", 0, Some(sender.clone()))
+            .map_err(|e| format!("{:?}", e))?;
+        auth.authenticate().map_err(|e| format!("{:?}", e))
+    });
+    let mut out = std::io::stdout();
+    // Forward conversation messages (e.g. "Place your finger on the sensor")
+    // until the worker's sender is dropped, i.e. the verdict is in.
+    while let Ok(ev) = receiver.recv() {
+        if let AuthEvent::Info { msg, .. } = ev {
+            let _ = writeln!(out, "{}{}", FPRINT_LINE_INFO, msg.replace('\n', " "));
+            let _ = out.flush();
+        }
+    }
+    let verdict = match worker.join() {
+        Ok(Ok(())) => FPRINT_LINE_OK.to_string(),
+        Ok(Err(e)) => format!("{}{}", FPRINT_LINE_FAIL, e),
+        Err(_) => format!("{}fingerprint worker panicked", FPRINT_LINE_FAIL),
+    };
+    let _ = writeln!(out, "{}", verdict);
+    let _ = out.flush();
+    std::process::exit(if verdict == FPRINT_LINE_OK { 0 } else { 1 });
 }
 
 #[derive(serde::Deserialize, Debug, Default)]
@@ -1605,6 +1776,8 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 && args[1] == "--greeter" {
         run_greeter();
+    } else if args.len() > 2 && args[1] == "--fprint-auth" {
+        run_fprint_helper(&args[2]);
     } else {
         run_daemon();
     }

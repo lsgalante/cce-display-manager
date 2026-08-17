@@ -1,0 +1,14 @@
+#%PAM-1.0
+# Fingerprint-only service used by the greeter for its background / empty-
+# password attempt. `requisite` ends the auth stack the moment pam_fprintd
+# fails, so a fingerprint miss (or a timeout, or a "device already claimed"
+# error) can never fall through into pam_unix with an empty password. That
+# fall-through was a pam_faillock strike each time: three fingerprint misses
+# locked the account, and then the correct password was silently rejected
+# for ten minutes (2026-08-17). No system-local-login include on purpose.
+
+auth       requisite    pam_fprintd.so
+
+account    include      system-local-login
+
+session    include      system-local-login

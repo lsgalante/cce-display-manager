@@ -1,6 +1,9 @@
 #%PAM-1.0
+# Legacy service name. The greeter no longer authenticates against it: the
+# fingerprint attempt uses cce-display-manager-fprint and typed passwords use
+# cce-display-manager-password. pam_fprintd was removed from here so that
+# nothing can turn a fingerprint miss into a pam_unix/pam_faillock failure.
 
-auth       sufficient   pam_fprintd.so
 auth       include      system-local-login
 -auth      optional     pam_gnome_keyring.so
 -auth      optional     pam_kwallet5.so
