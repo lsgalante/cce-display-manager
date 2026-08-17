@@ -779,12 +779,19 @@ impl cce_ui::engine::Application for State {
                                 }
                             }
                             AuthEvent::Failure { err_msg, .. } => {
+                                let was_fprint = app.fprint_child.is_some();
                                 if let Some(mut child) = app.fprint_child.take() {
                                     let _ = child.wait();
                                 }
                                 app.is_authenticating = false;
                                 app.login_btn.base_mut().label = Some("Log In".to_string());
-                                app.status_lbl.text = err_msg;
+                                app.status_lbl.text = if was_fprint {
+                                    // Raw PAM codes ("AUTHINFO_UNAVAIL") told the
+                                    // user nothing, least of all how to retry.
+                                    format!("{} — press Enter to scan again, or type password", fprint_failure_text(&err_msg))
+                                } else {
+                                    err_msg
+                                };
                                 app.status_lbl.is_error = true;
                                 app.password_box.text.clear();
                                 app.password_box.edit_buffer.clear();
@@ -970,6 +977,18 @@ const PASSWORD_PAM_SERVICE: &str = "cce-display-manager-password";
 /// respawn; it does not auto-start the fingerprint attempt again.
 const FPRINT_AUTOSTART_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(20);
 const FPRINT_AUTOSTART_STAMP: &str = "/run/cce-display-manager/fprint-autostart";
+
+/// Human text for the verdict the fingerprint helper reports (a PamReturnCode
+/// Debug name, or a helper-level message).
+fn fprint_failure_text(code: &str) -> String {
+    match code {
+        // pam_fprintd: verify timed out, or the user has no enrolled prints.
+        "AUTHINFO_UNAVAIL" => "No fingerprint read (timed out or none enrolled)".to_string(),
+        "MAXTRIES" | "AUTH_ERR" => "Fingerprint not recognized".to_string(),
+        "SERVICE_ERR" | "SYSTEM_ERR" => "Fingerprint reader unavailable".to_string(),
+        other => format!("Fingerprint failed ({})", other),
+    }
+}
 
 fn fprint_autostart_recently() -> bool {
     std::fs::metadata(FPRINT_AUTOSTART_STAMP)
