@@ -17,11 +17,14 @@ Environment=RUST_LOG=info
 NoNewPrivileges=yes
 CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_SYS_PTRACE
 ProtectSystem=strict
-# /run/user is its OWN tmpfs: ReadWritePaths=/run does not reach into the
-# submount, ProtectSystem=strict remounts it ro, and connect() to the user
-# bus socket then fails EACCES — which broke every unlock until listed here.
+# /run/user is listed explicitly: it is its own tmpfs, and the submount must
+# be exempt from the strict read-only pass for connect() to the user bus.
 ReadWritePaths=/run /run/user
-ProtectHome=yes
+# NO ProtectHome: every variant of it ALSO covers /run/user (systemd mounts
+# an inaccessible dir over it — EACCES on the bus socket broke every unlock,
+# and it shadows any ReadWritePaths entry). /home stays read-only via
+# ProtectSystem=strict, which is protection enough here.
+ProtectHome=no
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
