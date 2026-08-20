@@ -17,7 +17,10 @@ Environment=RUST_LOG=info
 NoNewPrivileges=yes
 CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_SYS_PTRACE
 ProtectSystem=strict
-ReadWritePaths=/run
+# /run/user is its OWN tmpfs: ReadWritePaths=/run does not reach into the
+# submount, ProtectSystem=strict remounts it ro, and connect() to the user
+# bus socket then fails EACCES — which broke every unlock until listed here.
+ReadWritePaths=/run /run/user
 ProtectHome=yes
 PrivateTmp=yes
 ProtectKernelTunables=yes
