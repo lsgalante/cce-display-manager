@@ -1414,28 +1414,6 @@ fn run_daemon() {
         std::fs::set_permissions(&runtime_dir, std::fs::Permissions::from_mode(0o700))
             .expect("failed to set runtime dir permissions");
     }
-    // Ensure polkit-agent-helper-1 has SUID root permissions so cce-authenticator can authenticate sessions
-    let helper_paths = [
-        "/usr/lib/polkit-1/polkit-agent-helper-1",
-        "/usr/lib/policykit-1/polkit-agent-helper-1",
-    ];
-    for path in &helper_paths {
-        if std::path::Path::new(path).exists() {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(metadata) = std::fs::metadata(path) {
-                let mut perms = metadata.permissions();
-                let mode = perms.mode();
-                if (mode & 0o4000) == 0 {
-                    log::info!("Restoring SUID root permissions to {} (current mode: {:o})", path, mode);
-                    perms.set_mode(mode | 0o4000 | 0o0111);
-                    if let Err(e) = std::fs::set_permissions(path, perms) {
-                        log::error!("Failed to set permissions on {}: {}", path, e);
-                    }
-                }
-            }
-        }
-    }
-
     // Set when the compositor requested a restart (`ccectl restart-compositor`
     // wrote the flag file and exited): the next loop iteration relaunches the
     // same session directly — no greeter, autologin PAM service.
