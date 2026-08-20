@@ -200,7 +200,12 @@ fn verify_keepassxc_owner(
         .body()
         .deserialize()?;
     let exe = std::fs::read_link(format!("/proc/{pid}/exe"))?;
-    if exe != std::path::Path::new(KEEPASSXC_EXE) {
+    // A package upgrade unlinks the running binary and the kernel reports
+    // "/usr/bin/keepassxc (deleted)" — still the real KeePassXC, and refusing
+    // it would break auto-unlock until the app restarts. Strip the marker.
+    let exe_str = exe.to_string_lossy();
+    let exe_path = exe_str.strip_suffix(" (deleted)").unwrap_or(&exe_str);
+    if std::path::Path::new(exe_path) != std::path::Path::new(KEEPASSXC_EXE) {
         return Err(format!("bus name owned by {} (pid {pid}), not {KEEPASSXC_EXE}", exe.display()).into());
     }
     let meta = std::fs::metadata(format!("/proc/{pid}"))?;

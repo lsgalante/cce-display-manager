@@ -25,6 +25,24 @@ struct Session {
     is_wayland: bool,
 }
 
+/// Parse a greeter `AUTH_SUCCESS|user|exec|is_wayland|password` line.
+///
+/// The password is the LAST field and is taken verbatim to the end of the
+/// line (`splitn`), because it may itself contain `|` — a plain `split`
+/// silently produced six fields and dropped the login (the greeter had
+/// already authenticated, so the user just hung at a dead greeter).
+fn parse_auth_success(line: &str) -> Option<(String, String, bool, String)> {
+    let mut parts = line.splitn(5, '|');
+    if parts.next() != Some("AUTH_SUCCESS") {
+        return None;
+    }
+    let username = parts.next()?.to_string();
+    let exec = parts.next()?.to_string();
+    let is_wayland = parts.next()?.parse::<bool>().unwrap_or(true);
+    let password = parts.next()?.to_string();
+    Some((username, exec, is_wayland, password))
+}
+
 fn sanitize_exec(exec: &str) -> (String, Vec<String>) {
     let mut parts = Vec::new();
     for part in exec.split_whitespace() {
@@ -1201,11 +1219,14 @@ extern "C" fn pam_conversation_fn(
             let m = &**msg.offset(i);
             let r = &mut *resp.offset(i);
             let style = m.msg_style;
+            // unwrap_or_default, not unwrap: an interior NUL in the typed
+            // password would otherwise panic across this extern "C" boundary
+            // (process abort). An empty response just fails authentication.
             if style == pam_sys::PamMessageStyle::PROMPT_ECHO_ON as libc::c_int {
-                let user_c = std::ffi::CString::new(data.username.clone()).unwrap();
+                let user_c = std::ffi::CString::new(data.username.clone()).unwrap_or_default();
                 r.resp = libc::strdup(user_c.as_ptr());
             } else if style == pam_sys::PamMessageStyle::PROMPT_ECHO_OFF as libc::c_int {
-                let pass_c = std::ffi::CString::new(data.password.clone()).unwrap();
+                let pass_c = std::ffi::CString::new(data.password.clone()).unwrap_or_default();
                 r.resp = libc::strdup(pass_c.as_ptr());
             } else if style == pam_sys::PamMessageStyle::ERROR_MSG as libc::c_int || style == pam_sys::PamMessageStyle::TEXT_INFO as libc::c_int {
                 if !m.msg.is_null() {
@@ -1249,7 +1270,7 @@ impl PamSession {
         }
 
         unsafe {
-            let pass_c = std::ffi::CString::new(password).unwrap();
+            let pass_c = std::ffi::CString::new(password).unwrap_or_default();
             let _ = pam_sys::raw::pam_set_item(handle, pam_sys::PamItemType::AUTHTOK as libc::c_int, pass_c.as_ptr() as *const libc::c_void);
             
             let raw_tty = std::fs::read_link("/proc/self/fd/0")
@@ -1366,8 +1387,10 @@ fn run_daemon() {
     let is_real_tty = raw_tty.starts_with("tty");
     let tty_name = if is_real_tty { raw_tty } else { "tty1".to_string() };
 
-    // Redirect stdout and stderr of the daemon to a log file
-    let log_path = format!("/tmp/cce-display-manager-daemon-{}.log", tty_name);
+    // Redirect stdout and stderr of the daemon to a log file. /var/log, not
+    // /tmp: only root can create names there, so a local user cannot pre-place
+    // a file or symlink at the predictable path for root to open and truncate.
+    let log_path = format!("/var/log/cce-display-manager-{}.log", tty_name);
     if let Ok(log_file) = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -1476,12 +1499,7 @@ fn run_daemon() {
         for line in reader.lines() {
             if let Ok(line_str) = line {
                 if line_str.starts_with("AUTH_SUCCESS|") {
-                    let parts: Vec<&str> = line_str.split('|').collect();
-                    if parts.len() == 5 {
-                        let username = parts[1].to_string();
-                        let exec = parts[2].to_string();
-                        let is_wayland = parts[3].parse::<bool>().unwrap_or(true);
-                        let password = parts[4].to_string();
+                    if let Some((username, exec, is_wayland, password)) = parse_auth_success(&line_str) {
                         log::info!("[greeter-stdout] AUTH_SUCCESS|{}|{}|{}", username, exec, is_wayland);
                         auth_success = Some((username, exec, is_wayland, password));
                         // Don't read to EOF: the greeter has already exited,
@@ -1491,6 +1509,8 @@ fn run_daemon() {
                         // reading and terminate it ourselves below.
                         break;
                     }
+                    // Never echo the raw line: field 5 is the password.
+                    log::warn!("[greeter-stdout] malformed AUTH_SUCCESS line (redacted); login attempt dropped");
                 } else {
                     log::info!("[greeter-stdout] {}", line_str);
                 }
@@ -1764,12 +1784,16 @@ fn launch_session(
         }
         log::info!("Session worker child (PID {}) exited with status: {}", pid, status);
 
-        // Compositor-requested restart: honor the flag only when it is owned
-        // by the session user (anyone can create names in /tmp).
-        if let Ok(meta) = std::fs::metadata(&flag_path) {
+        // Compositor-requested restart: honor the flag only when it is a
+        // regular file owned by the session user (anyone can create names in
+        // /tmp). symlink_metadata, not metadata: a plain stat follows
+        // symlinks, so another user's link pointing at any file the session
+        // user owns would pass the owner check.
+        if let Ok(meta) = std::fs::symlink_metadata(&flag_path) {
             use std::os::unix::fs::MetadataExt;
-            let owner_ok = users::get_user_by_name(&username)
-                .map_or(false, |u| u.uid() == meta.uid());
+            let owner_ok = meta.file_type().is_file()
+                && users::get_user_by_name(&username)
+                    .map_or(false, |u| u.uid() == meta.uid());
             let _ = std::fs::remove_file(&flag_path);
             if owner_ok {
                 *pending_relaunch = Some((username, exec, is_wayland));
@@ -1804,3 +1828,49 @@ fn main() {
 
 
 
+
+#[cfg(test)]
+mod tests {
+    use super::parse_auth_success;
+
+    #[test]
+    fn auth_success_plain() {
+        let got = parse_auth_success("AUTH_SUCCESS|lucas|startcce|true|hunter2");
+        assert_eq!(
+            got,
+            Some(("lucas".into(), "startcce".into(), true, "hunter2".into()))
+        );
+    }
+
+    #[test]
+    fn auth_success_password_with_pipes() {
+        // The password is the last field and may contain the separator.
+        let got = parse_auth_success("AUTH_SUCCESS|lucas|startcce|true|a|b|c");
+        assert_eq!(
+            got,
+            Some(("lucas".into(), "startcce".into(), true, "a|b|c".into()))
+        );
+    }
+
+    #[test]
+    fn auth_success_empty_password_fingerprint_path() {
+        let got = parse_auth_success("AUTH_SUCCESS|lucas|startcce|true|");
+        assert_eq!(
+            got,
+            Some(("lucas".into(), "startcce".into(), true, String::new()))
+        );
+    }
+
+    #[test]
+    fn auth_success_malformed() {
+        assert_eq!(parse_auth_success("AUTH_SUCCESS|lucas|startcce"), None);
+        assert_eq!(parse_auth_success("AUTH_SUCCESS|"), None);
+        assert_eq!(parse_auth_success("NOT_A_THING|x|y|z|w"), None);
+    }
+
+    #[test]
+    fn auth_success_bad_bool_defaults_wayland() {
+        let got = parse_auth_success("AUTH_SUCCESS|lucas|startcce|banana|pw");
+        assert_eq!(got.map(|t| t.2), Some(true));
+    }
+}

@@ -9,5 +9,29 @@ Restart=on-failure
 RestartSec=2
 Environment=RUST_LOG=info
 
+# Sandboxing. The daemon needs: bind + chmod its socket in /run, connect to
+# /run/user/<uid>/bus (after seteuid to the caller — CAP_SETUID/SETGID),
+# readlink /proc/<pid>/exe of the user's KeePassXC (CAP_SYS_PTRACE), read
+# /etc/cce/keyring-unlock, and spawn systemd-creds (TPM via /dev/tpmrm0, so
+# no PrivateDevices). Everything else is fenced off.
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_SYS_PTRACE
+ProtectSystem=strict
+ReadWritePaths=/run
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
 [Install]
 WantedBy=multi-user.target
