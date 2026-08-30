@@ -1,0 +1,78 @@
+#!/bin/sh
+# cce-gnome-keyring-enroll — one-time setup for the auto-unlocked login keyring.
+#
+# Seals a random keyring password to this machine's TPM using tpm2-tools
+# directly, and creates the gnome-keyring "login" keyring with it.
+#
+# Why tpm2-tools and NOT systemd-creds: `systemd-creds` running as a non-root
+# user does not touch the TPM itself — it delegates to a root varlink service
+# that is polkit-gated. That works in an interactive session and fails at
+# login with io.systemd.InteractiveAuthenticationRequired, which is exactly
+# how this broke on 2026-08-29. tpm2-tools talks to /dev/tpmrm0 directly via
+# the `tss` group, so it needs no agent and no authorization prompt.
+#
+# The seal is bound to the TPM but deliberately NOT to PCRs: PCR policy would
+# invalidate the blob on every kernel or firmware update, trading a disk-theft
+# risk for routine breakage. The threat this defends against is a stolen disk,
+# which TPM binding alone already covers.
+#
+# Safe to re-run: refuses to clobber an existing seal unless --force.
+
+set -eu
+
+DIR="$HOME/.config/cce"
+PUB="$DIR/keyring-seal.pub"
+PRIV="$DIR/keyring-seal.priv"
+KEYRINGS="$HOME/.local/share/keyrings"
+FORCE=0
+[ "${1:-}" = "--force" ] && FORCE=1
+
+command -v tpm2_createprimary >/dev/null 2>&1 || {
+    echo "error: tpm2-tools not installed — run: sudo pacman -S tpm2-tools" >&2; exit 1; }
+[ -r /dev/tpmrm0 ] || {
+    echo "error: cannot read /dev/tpmrm0 — this user must be in the 'tss' group" >&2; exit 1; }
+if [ -e "$PRIV" ] && [ "$FORCE" -eq 0 ]; then
+    echo "error: $PRIV already exists; re-run with --force to replace it" >&2; exit 1
+fi
+
+mkdir -p "$DIR" "$KEYRINGS"; chmod 700 "$DIR" "$KEYRINGS"
+umask 077
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT INT TERM
+
+# 32 bytes of kernel entropy, base64 — never typed, never shown.
+PASSWORD=$(head -c 32 /dev/urandom | base64 -w0)
+
+# The owner-hierarchy primary key is derived deterministically from the TPM's
+# seed, so the same template regenerates the identical key at every boot. That
+# avoids persisting a handle (and the eviction bookkeeping that comes with it).
+echo "creating TPM primary key..."
+tpm2_createprimary -Q -C o -g sha256 -G ecc -c "$TMP/primary.ctx"
+
+echo "sealing keyring password to the TPM..."
+printf '%s' "$PASSWORD" | tpm2_create -Q -C "$TMP/primary.ctx" \
+    -a "fixedtpm|fixedparent|userwithauth|noda" \
+    -i - -u "$PUB" -r "$PRIV"
+chmod 600 "$PUB" "$PRIV"
+
+# Verify the unseal round trip BEFORE destroying the old keyring: if the TPM
+# cannot give the password back, stopping here leaves everything as it was.
+tpm2_load -Q -C "$TMP/primary.ctx" -u "$PUB" -r "$PRIV" -c "$TMP/seal.ctx"
+BACK=$(tpm2_unseal -c "$TMP/seal.ctx")
+[ "$BACK" = "$PASSWORD" ] || { echo "error: TPM round trip failed" >&2; exit 1; }
+echo "verified TPM round trip"
+
+# Recreate the login keyring under the new password. The old one is kept
+# aside, never deleted.
+systemctl --user stop gnome-keyring-daemon.service 2>/dev/null || true
+if [ -s "$KEYRINGS/login.keyring" ]; then
+    mv "$KEYRINGS/login.keyring" "$KEYRINGS/login.keyring.superseded-$(date +%Y%m%d%H%M%S)"
+    echo "set aside previous login.keyring"
+fi
+systemctl --user start gnome-keyring-daemon.service
+sleep 3
+systemctl --user is-active --quiet gnome-keyring-daemon.service \
+    || { echo "error: gnome-keyring-daemon did not stay running" >&2; exit 1; }
+echo "created and unlocked the login keyring"
+
+printf 'login' > "$KEYRINGS/default"
+echo "set 'login' as the default keyring"

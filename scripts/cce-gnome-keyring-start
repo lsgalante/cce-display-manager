@@ -1,0 +1,50 @@
+#!/bin/sh
+# cce-gnome-keyring-start — run gnome-keyring-daemon, unlocked, as ONE process.
+#
+# Two failures this shape is deliberately built around, both hit on 2026-08-29:
+#
+#  1. `gnome-keyring-daemon --unlock` does NOT exit — it daemonizes into a
+#     second keyring daemon. Two daemons racing for org.freedesktop.secrets is
+#     the same class of bug that made the old KeePassXC setup unpredictable.
+#     So the password goes into the daemon's own stdin at startup instead.
+#
+#  2. `systemd-creds decrypt` as a non-root user delegates to a polkit-gated
+#     root service. It succeeds in an interactive session and fails at login
+#     (io.systemd.InteractiveAuthenticationRequired), which wedged the greeter.
+#     tpm2-tools talks to /dev/tpmrm0 directly via the `tss` group — no agent,
+#     no prompt, no authorization step that can be absent at boot.
+#
+# Login here is by fingerprint, so PAM never sees a password and cannot unlock
+# anything; the keyring password is sealed to the TPM instead.
+
+set -eu
+
+DIR="${CCE_KEYRING_DIR:-$HOME/.config/cce}"
+PUB="$DIR/keyring-seal.pub"
+PRIV="$DIR/keyring-seal.priv"
+
+[ -r "$PRIV" ] || { echo "no TPM seal at $PRIV; run cce-gnome-keyring-enroll" >&2; exit 1; }
+
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT INT TERM
+
+# The TPM serializes, so a request racing another user of it fails
+# transiently. Retry the whole unseal, primary key included.
+n=0
+until PW=$( { tpm2_createprimary -Q -C o -g sha256 -G ecc -c "$TMP/primary.ctx" \
+              && tpm2_load -Q -C "$TMP/primary.ctx" -u "$PUB" -r "$PRIV" -c "$TMP/seal.ctx" \
+              && tpm2_unseal -c "$TMP/seal.ctx"; } 2>&1 ); do
+    n=$((n + 1))
+    if [ "$n" -ge 5 ]; then
+        echo "TPM unseal failed after $n attempts: $PW" >&2
+        exit 1
+    fi
+    sleep 1
+done
+
+# --unlock reads the password from stdin and creates the login keyring if it is
+# missing. --foreground keeps this under systemd instead of forking away.
+printf '%s' "$PW" | exec gnome-keyring-daemon \
+    --foreground \
+    --components=pkcs11,secrets \
+    --unlock \
+    --control-directory="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR unset}/keyring"
