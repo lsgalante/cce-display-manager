@@ -1372,6 +1372,12 @@ impl Drop for PamSession {
     }
 }
 
+/// PID of the greeter's `cage` process while a greeter is showing, else 0.
+/// Shared with the resume watchdog so it can force a clean greeter respawn
+/// after sleep without racing the daemon's blocking read of the greeter's
+/// stdout. Set right after the cage is spawned, cleared once it is reaped.
+static GREETER_CAGE_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
 fn run_daemon() {
     let uid = users::get_current_uid();
     if uid != 0 {
@@ -1419,6 +1425,12 @@ fn run_daemon() {
     // same session directly — no greeter, autologin PAM service.
     let mut pending_relaunch: Option<(String, String, bool)> = None;
 
+    // Recover the greeter across suspend/resume: resume leaves the greeter's
+    // cage DRM-paused and it cannot reliably reacquire the seat on its own.
+    if is_real_tty {
+        spawn_resume_watchdog(tty_name.clone());
+    }
+
     loop {
         if let Some((username, exec, is_wayland)) = pending_relaunch.take() {
             log::info!(
@@ -1430,17 +1442,11 @@ fn run_daemon() {
         }
 
         if is_real_tty {
-            log::info!("Waiting for {} to become the active TTY...", tty_name);
-            loop {
-                if let Ok(active_tty) = std::fs::read_to_string("/sys/class/tty/tty0/active") {
-                    let active_tty = active_tty.trim();
-                    if active_tty == tty_name {
-                        log::info!("{} is now active. Spawning greeter.", tty_name);
-                        break;
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(250));
-            }
+            // Actively claim tty1 rather than passively waiting for it: after a
+            // resume (or any stray VT switch) tty1 may not be foreground, and a
+            // greeter cage spawned onto an inactive VT comes up DRM-paused.
+            log::info!("Ensuring {} is the active TTY before spawning greeter...", tty_name);
+            ensure_vt_active(&tty_name);
         }
 
         log::info!("Spawning greeter session via cage...");
@@ -1468,6 +1474,7 @@ fn run_daemon() {
             .stdout(std::process::Stdio::piped())
             .spawn()
             .expect("failed to spawn cage compositor wrapper. Is cage installed?");
+        GREETER_CAGE_PID.store(child.id() as i32, std::sync::atomic::Ordering::SeqCst);
 
         let stdout = child.stdout.take().expect("failed to open child stdout");
         let reader = std::io::BufReader::new(stdout);
@@ -1499,6 +1506,7 @@ fn run_daemon() {
             terminate_greeter(&mut child);
         }
         let status = child.wait().expect("failed to wait on child process");
+        GREETER_CAGE_PID.store(0, std::sync::atomic::Ordering::SeqCst);
         log::info!("Greeter session exited with status: {}", status);
 
         if status.code() == Some(130) {
@@ -1560,6 +1568,108 @@ fn terminate_greeter(child: &mut std::process::Child) {
     }
     log::warn!("cage did not exit within 3s of SIGTERM; killing it");
     let _ = child.kill();
+}
+
+/// Per-message state machine over `busctl monitor` text output, detecting a
+/// logind resume: `PrepareForSleep(false)`. Each D-Bus message opens with a
+/// `Type=` header line (which resets us), a signal's header also carries
+/// `Member=...` (we arm only for `PrepareForSleep`), and the body carries the
+/// `BOOLEAN` payload. `PrepareForSleep(true)` precedes suspend and `(false)`
+/// follows resume, so we fire only on the `false`. Fail-safe: a format we do
+/// not recognise simply never fires (degrading to the pre-fix behaviour, never
+/// a spurious teardown).
+struct ResumeSignalParser {
+    armed: bool,
+}
+
+impl ResumeSignalParser {
+    fn new() -> Self {
+        Self { armed: false }
+    }
+
+    /// Feed one output line; returns true exactly when a resume message completes.
+    fn feed(&mut self, line: &str) -> bool {
+        if line.contains("Type=") {
+            self.armed = false;
+        }
+        if line.contains("PrepareForSleep") {
+            self.armed = true;
+        } else if self.armed && line.contains("BOOLEAN") {
+            let resume = line.contains("false");
+            self.armed = false;
+            return resume;
+        }
+        false
+    }
+}
+
+/// Watch logind's `PrepareForSleep` signal and, on resume, recover the greeter.
+/// Resume-from-suspend leaves the greeter's `cage` DRM-paused ("Atomic commit
+/// failed: Permission denied" looping on "Disabling seat"); it cannot reliably
+/// reacquire the seat on its own, so on resume we force the greeter's VT active
+/// and tear the cage down, letting the daemon loop spawn a fresh one on an
+/// active VT -- the same known-good state a service restart produces. This is a
+/// no-op while a user session is live (`GREETER_CAGE_PID == 0`): the running
+/// compositor owns the seat then, and we must not fight it. Uses `busctl`
+/// (always present with systemd) rather than a D-Bus crate to keep this
+/// login-critical binary's dependency surface minimal.
+fn spawn_resume_watchdog(tty_name: String) {
+    std::thread::spawn(move || loop {
+        let spawned = std::process::Command::new("busctl")
+            .args(["monitor", "--system", "org.freedesktop.login1"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        let mut child = match spawned {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("resume watchdog: could not start busctl ({}); retrying in 5s", e);
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                continue;
+            }
+        };
+        if let Some(stdout) = child.stdout.take() {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::new(stdout);
+            let mut parser = ResumeSignalParser::new();
+            for line in reader.lines() {
+                let Ok(line) = line else { break };
+                if parser.feed(&line) {
+                    on_resume(&tty_name);
+                }
+            }
+        }
+        let _ = child.wait();
+        log::warn!("resume watchdog: busctl monitor exited; restarting in 2s");
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    });
+}
+
+/// Force the greeter's VT active and, if a greeter `cage` is up, tear it down so
+/// the daemon loop respawns a clean one. See `spawn_resume_watchdog`. No-op when
+/// a user session owns the seat (`GREETER_CAGE_PID == 0`).
+fn on_resume(tty_name: &str) {
+    use std::sync::atomic::Ordering;
+    let pid = GREETER_CAGE_PID.load(Ordering::SeqCst);
+    if pid <= 0 {
+        return;
+    }
+    log::info!("Resume from sleep detected while greeter is up; forcing {} active and respawning greeter", tty_name);
+    ensure_vt_active(tty_name);
+    // SIGTERM first; a DRM-wedged cage can ignore it, so escalate to SIGKILL.
+    // Re-check the PID before escalating so we never signal a cage the daemon
+    // has already reaped and replaced with a fresh one.
+    unsafe { libc::kill(pid, libc::SIGTERM); }
+    for _ in 0..30 {
+        if GREETER_CAGE_PID.load(Ordering::SeqCst) != pid {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if GREETER_CAGE_PID.load(Ordering::SeqCst) == pid {
+        log::warn!("resume watchdog: greeter cage {} did not exit on SIGTERM; killing", pid);
+        unsafe { libc::kill(pid, libc::SIGKILL); }
+    }
 }
 
 /// The greeter/cage teardown (or a stray VT switch) can leave the session's VT
@@ -1850,5 +1960,71 @@ mod tests {
     fn auth_success_bad_bool_defaults_wayland() {
         let got = parse_auth_success("AUTH_SUCCESS|lucas|startcce|banana|pw");
         assert_eq!(got.map(|t| t.2), Some(true));
+    }
+}
+
+
+#[cfg(test)]
+mod resume_parser_tests {
+    use super::ResumeSignalParser;
+
+    // A representative PrepareForSleep signal as `busctl monitor` prints it.
+    fn feed_all(lines: &[&str]) -> usize {
+        let mut p = ResumeSignalParser::new();
+        lines.iter().filter(|l| p.feed(l)).count()
+    }
+
+    #[test]
+    fn detects_resume_false() {
+        let msg = [
+            "\u{2023} Type=signal  Endian=l  Flags=1  Version=1  Cookie=42",
+            "  Sender=:1.3  Path=/org/freedesktop/login1  Interface=org.freedesktop.login1.Manager  Member=PrepareForSleep",
+            "  MESSAGE \"b\" {",
+            "          BOOLEAN false;",
+            "  };",
+        ];
+        assert_eq!(feed_all(&msg), 1, "resume (false) must fire once");
+    }
+
+    #[test]
+    fn ignores_suspend_true() {
+        let msg = [
+            "\u{2023} Type=signal  Endian=l  Flags=1  Version=1  Cookie=41",
+            "  Sender=:1.3  Path=/org/freedesktop/login1  Interface=org.freedesktop.login1.Manager  Member=PrepareForSleep",
+            "  MESSAGE \"b\" {",
+            "          BOOLEAN true;",
+            "  };",
+        ];
+        assert_eq!(feed_all(&msg), 0, "suspend (true) must not fire");
+    }
+
+    #[test]
+    fn ignores_other_signal_with_boolean() {
+        // A different signal carrying a BOOLEAN false must not be mistaken for
+        // a resume: the Type= header resets us and there is no PrepareForSleep.
+        let msg = [
+            "\u{2023} Type=signal  Endian=l  Flags=1  Version=1  Cookie=99",
+            "  Sender=:1.3  Path=/org/freedesktop/login1  Interface=org.freedesktop.login1.Manager  Member=SessionRemoved",
+            "  MESSAGE \"b\" {",
+            "          BOOLEAN false;",
+            "  };",
+        ];
+        assert_eq!(feed_all(&msg), 0, "unrelated signal must not fire");
+    }
+
+    #[test]
+    fn full_cycle_fires_once_on_resume() {
+        // Suspend then resume, back to back: exactly one fire, on resume.
+        let mut p = ResumeSignalParser::new();
+        let stream = [
+            "\u{2023} Type=signal  Cookie=1",
+            "  Interface=org.freedesktop.login1.Manager  Member=PrepareForSleep",
+            "          BOOLEAN true;",
+            "\u{2023} Type=signal  Cookie=2",
+            "  Interface=org.freedesktop.login1.Manager  Member=PrepareForSleep",
+            "          BOOLEAN false;",
+        ];
+        let fires: usize = stream.iter().filter(|l| p.feed(l)).count();
+        assert_eq!(fires, 1);
     }
 }
