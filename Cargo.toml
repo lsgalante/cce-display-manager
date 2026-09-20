@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-cce-ui = { git = "https://git.lucas.co/cce-ui.git", rev = "25f369d01e996fdd1b9f44f8f37ca154271303ba" }
+cce-ui = { git = "https://git.lucas.co/cce-ui.git", rev = "f017998d18d89e7e6deea58fd73f36d33eab7d7d" }
 pam = "0.7.0"
 pam-sys = "0.5.6"
 libc = "0.2"
