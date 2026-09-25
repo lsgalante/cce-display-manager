@@ -8,7 +8,12 @@ Before=graphical.target
 Type=simple
 ExecStart=/usr/bin/cce-display-manager
 StandardInput=tty
-StandardOutput=tty
+# The daemon, greeter, cage and session worker log to the journal
+# (journalctl -u); the daemon sees JOURNAL_STREAM and skips its old
+# /var/log file. The session's own output goes to the user's
+# /run/user/<uid>/cce-session.log, not here.
+StandardOutput=journal
+StandardError=journal
 TTYPath=/dev/tty1
 TTYReset=yes
 TTYVHangup=yes

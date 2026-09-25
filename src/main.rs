@@ -124,7 +124,7 @@ fn discover_sessions() -> Vec<Session> {
     }
     sessions.push(Session {
         name: "Bash Shell".to_string(),
-        exec: "bash".to_string(),
+        exec: CONSOLE_SESSION_EXEC.to_string(),
         is_wayland: true,
     });
     sessions
@@ -1433,21 +1433,28 @@ fn run_daemon() {
     let is_real_tty = raw_tty.starts_with("tty");
     let tty_name = if is_real_tty { raw_tty } else { "tty1".to_string() };
 
-    // Redirect stdout and stderr of the daemon to a log file. /var/log, not
-    // /tmp: only root can create names there, so a local user cannot pre-place
-    // a file or symlink at the predictable path for root to open and truncate.
+    // Where the daemon, the greeter, cage and the session worker log. Under
+    // the unit's StandardOutput=journal systemd has connected stdout/stderr
+    // to the journal and says so in JOURNAL_STREAM: leave them there —
+    // journald keeps every boot and rotates. Otherwise (an older unit, which
+    // points them at the tty) redirect to a file. /var/log, not /tmp: only
+    // root can create names there, so a local user cannot pre-place a file
+    // or symlink at the predictable path for root to open and truncate.
     let log_path = format!("/var/log/cce-display-manager-{}.log", tty_name);
-    if let Ok(log_file) = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&log_path)
-    {
-        use std::os::unix::io::AsRawFd;
-        let fd = log_file.as_raw_fd();
-        unsafe {
-            libc::dup2(fd, 1);
-            libc::dup2(fd, 2);
+    let journaled = std::env::var_os("JOURNAL_STREAM").is_some();
+    if !journaled {
+        if let Ok(log_file) = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&log_path)
+        {
+            use std::os::unix::io::AsRawFd;
+            let fd = log_file.as_raw_fd();
+            unsafe {
+                libc::dup2(fd, 1);
+                libc::dup2(fd, 2);
+            }
         }
     }
 
@@ -1794,12 +1801,22 @@ fn terminate_session(session_id: &str) {
     kill("SIGKILL");
 }
 
-/// Fork the session worker (PAM open_session + user-session spawn) and wait
-/// for it — shared by the greeter login path and the compositor-restart
-/// relaunch path. If the session left a restart flag (`ccectl
-/// restart-compositor` writes it before a clean exit), arm
+/// Run the session worker (PAM open_session + user-session spawn, see
+/// [`run_session_worker`]) and wait for it — shared by the greeter login path
+/// and the compositor-restart relaunch path. If the session left a restart
+/// flag (`ccectl restart-compositor` writes it before a clean exit), arm
 /// `pending_relaunch` so the daemon loop relaunches this same session
 /// directly, greeter skipped (empty password → the autologin PAM service).
+///
+/// The worker is `<this binary> --session-worker`, a fresh process — NOT a
+/// `fork()` of the daemon, as it was until 2026-09-25. The daemon is
+/// multi-threaded (the resume watchdog), and a forked child inherits whatever
+/// locks another thread held at that instant; the worker then did PAM, env
+/// writes, logging and process spawns under them — the class of wedge that
+/// froze the greeter's login (fixed there on 2026-09-18 by the same cure).
+/// `Command` with no `pre_exec` does only async-signal-safe work between its
+/// fork and exec. The password rides the worker's STDIN, never its argv
+/// (world-readable in /proc); the session id comes back on its STDOUT.
 fn launch_session(
     username: String,
     exec: String,
@@ -1808,7 +1825,7 @@ fn launch_session(
     tty_name: &str,
     pending_relaunch: &mut Option<(String, String, bool)>,
 ) {
-    use users::os::unix::UserExt;
+    use std::io::{BufRead, Write};
     log::info!("Launching user session Exec: '{}' (Wayland: {}) for user: '{}'", exec, is_wayland, username);
     // A stale flag from a previous session must not trigger a phantom relaunch.
     let flag_path = format!("/tmp/cce-restart-requested-{}", username);
@@ -1816,219 +1833,324 @@ fn launch_session(
 
     ensure_vt_active(tty_name);
 
-    // The worker reports its logind session id up this pipe, so that once the
-    // session is over the daemon can end it (see `terminate_session`).
-    // O_CLOEXEC: the user session the worker execs must not inherit the write
-    // end, or the daemon's read would wait on every process the session ever
-    // spawns.
-    let mut id_pipe = [-1 as libc::c_int; 2];
-    let have_pipe = unsafe { libc::pipe2(id_pipe.as_mut_ptr(), libc::O_CLOEXEC) } == 0;
-    if !have_pipe {
-        log::warn!("no session-id pipe ({}); the session will not be ended on exit", std::io::Error::last_os_error());
+    let spawned = std::process::Command::new(daemon_exe())
+        .args(session_worker_args(tty_name, &username, is_wayland, &exec))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn();
+    let mut worker = match spawned {
+        Ok(w) => w,
+        Err(e) => {
+            log::error!("Failed to start the session worker: {}", e);
+            return;
+        }
+    };
+    if let Some(mut stdin) = worker.stdin.take() {
+        // Dropped at the end of this block: EOF tells the worker it has all
+        // of it. An empty write is the autologin path.
+        let _ = stdin.write_all(password.as_bytes());
     }
-
-    let pid = unsafe { libc::fork() };
-    if pid < 0 {
-        log::error!("Fork failed: {}", std::io::Error::last_os_error());
-        if have_pipe {
-            unsafe {
-                libc::close(id_pipe[0]);
-                libc::close(id_pipe[1]);
+    // Read to EOF, which comes as soon as the worker has reported (it points
+    // its stdout at /dev/null right after) or has exited — never held open by
+    // the session, which does not inherit the pipe.
+    let mut session_id = String::new();
+    if let Some(stdout) = worker.stdout.take() {
+        for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Some(id) = parse_session_id_line(&line) {
+                session_id = id.to_string();
             }
         }
-        return;
-    } else if pid == 0 {
-                if have_pipe {
-                    unsafe { libc::close(id_pipe[0]) };
-                }
-                // Child process: execute PAM session and spawn the compositor/user session
-                let user = match users::get_user_by_name(&username) {
-                    Some(u) => u,
-                    None => {
-                        log::error!("Error: User '{}' not found in system.", username);
-                        std::process::exit(1);
-                    }
-                };
+    }
+    match worker.wait() {
+        Ok(status) => log::info!("Session worker (PID {}) exited with {}", worker.id(), status),
+        Err(e) => log::error!("waiting on the session worker: {}", e),
+    }
+    terminate_session(&session_id);
 
-                let user_uid = user.uid();
-                let user_gid = user.primary_group_id();
-                let home_dir = user.home_dir().to_path_buf();
-                let shell = user.shell().to_str().unwrap_or("/bin/bash").to_string();
+    // Compositor-requested restart: honor the flag only when it is a
+    // regular file owned by the session user (anyone can create names in
+    // /tmp). symlink_metadata, not metadata: a plain stat follows
+    // symlinks, so another user's link pointing at any file the session
+    // user owns would pass the owner check.
+    if let Ok(meta) = std::fs::symlink_metadata(&flag_path) {
+        use std::os::unix::fs::MetadataExt;
+        let owner_ok = meta.file_type().is_file()
+            && users::get_user_by_name(&username)
+                .map_or(false, |u| u.uid() == meta.uid());
+        let _ = std::fs::remove_file(&flag_path);
+        if owner_ok {
+            *pending_relaunch = Some((username, exec, is_wayland));
+            return; // relaunching immediately — no VT switch back
+        }
+        log::warn!("Ignoring restart flag {} with wrong owner", flag_path);
+    }
 
-                let user_runtime_dir = format!("/run/user/{}", user_uid);
+    if let Some(vt) = tty_name.strip_prefix("tty").and_then(|s| s.parse::<u32>().ok()) {
+        log::info!("Switching back to VT {}...", vt);
+        let _ = std::process::Command::new("chvt")
+            .arg(vt.to_string())
+            .status();
+    }
+}
 
-                // Set environment variables in the session worker process before PAM open_session.
-                // This is crucial for pam_gnome_keyring.so / pam_kwallet5.so to run successfully.
-                std::env::set_var("USER", &username);
-                std::env::set_var("LOGNAME", &username);
-                std::env::set_var("HOME", home_dir.to_str().unwrap_or(""));
-                std::env::set_var("SHELL", &shell);
-                std::env::set_var("XDG_RUNTIME_DIR", &user_runtime_dir);
+/// The installed binary, for the processes the daemon runs as itself.
+fn daemon_exe() -> std::path::PathBuf {
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/usr/bin/cce-display-manager"));
+    if exe.exists() { exe } else { std::path::PathBuf::from("/usr/bin/cce-display-manager") }
+}
 
-                // No fallback service: pam_start does not fail for a missing
-                // stack (PAM falls back to /etc/pam.d/other), so the old
-                // retry on ly's `ly-autologin` / `login` could never run.
-                let service = session_pam_service(&password);
-                let mut auth = match PamSession::new(service, &username, &password, 0, None) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        log::error!("PAM Init Error in child: {:?}", e);
-                        std::process::exit(1);
-                    }
-                };
+/// The session worker's argv after the program name. `exec` goes last and
+/// whole — it may contain spaces. No password: see [`launch_session`].
+fn session_worker_args(tty_name: &str, username: &str, is_wayland: bool, exec: &str) -> Vec<String> {
+    vec![
+        "--session-worker".to_string(),
+        tty_name.to_string(),
+        username.to_string(),
+        is_wayland.to_string(),
+        exec.to_string(),
+    ]
+}
 
-                let session_type_env = if is_wayland {
-                    "XDG_SESSION_TYPE=wayland"
-                } else {
-                    "XDG_SESSION_TYPE=x11"
-                };
-                let _ = auth.putenv(session_type_env);
-                let _ = auth.putenv("XDG_SESSION_CLASS=user");
+/// The other half of [`session_worker_args`]: `(tty, username, is_wayland,
+/// exec)` from a full argv, or `None` if it is not a session-worker argv.
+fn parse_session_worker_args(args: &[String]) -> Option<(String, String, bool, String)> {
+    if args.len() != 6 || args[1] != "--session-worker" {
+        return None;
+    }
+    Some((args[2].clone(), args[3].clone(), args[4] == "true", args[5].clone()))
+}
 
-                if let Err(e) = auth.authenticate() {
-                    log::error!("PAM Authentication failed in child: {:?}", e);
-                    std::process::exit(1);
-                }
+const SESSION_ID_PREFIX: &str = "SESSION_ID ";
 
-                if let Err(e) = auth.open_session() {
-                    log::error!("PAM Session failed in child: {:?}", e);
-                    std::process::exit(1);
-                }
+/// The worker's report line, `SESSION_ID <id>`: the id, if this is one.
+fn parse_session_id_line(line: &str) -> Option<&str> {
+    line.strip_prefix(SESSION_ID_PREFIX).map(str::trim).filter(|id| !id.is_empty())
+}
 
-                let pam_env = auth.get_env();
-                log::info!("PAM Environment variables: {:?}", pam_env);
+/// The console session's Exec — a shell ON the tty, where a graphical
+/// session's output goes to its log instead (see [`run_session_worker`]).
+const CONSOLE_SESSION_EXEC: &str = "bash";
 
-                if have_pipe {
-                    if let Some((_, session_id)) = pam_env.iter().find(|(k, _)| k == "XDG_SESSION_ID") {
-                        let line = format!("{}\n", session_id);
-                        unsafe {
-                            libc::write(id_pipe[1], line.as_ptr() as *const libc::c_void, line.len());
-                        }
-                    }
-                    unsafe { libc::close(id_pipe[1]) };
-                }
+/// The graphical session's stdout/stderr, and where the previous session's
+/// is kept: in the user's runtime dir beside `startcce`'s own logs, one
+/// session back — a compositor restart starts a new session, and the log of
+/// the one that died is the log worth reading.
+fn session_log_paths(uid: u32) -> (String, String) {
+    let log = format!("/run/user/{}/cce-session.log", uid);
+    let old = format!("{}.old", log);
+    (log, old)
+}
 
-                if let Some((_, session_id)) = pam_env.iter().find(|(k, _)| k == "XDG_SESSION_ID") {
-                    log::info!("Explicitly activating logind session {} via loginctl...", session_id);
-                    let _ = std::process::Command::new("loginctl")
-                        .arg("activate")
-                        .arg(session_id)
-                        .status();
-                }
-                
-                let (cmd_bin, cmd_args): (String, Vec<String>) = if is_wayland {
-                    sanitize_exec(&exec)
-                } else {
-                    let (client_bin, client_args) = sanitize_exec(&exec);
-                    let xinit_bin = "/usr/sbin/xinit".to_string();
-                    let mut args = vec![client_bin];
-                    args.extend(client_args);
-                    args.push("--".to_string());
-                    args.push("-keeptty".to_string());
-                    (xinit_bin, args)
-                };
+/// `--session-worker <tty> <user> <is_wayland> <exec>`, password on stdin:
+/// open the user's PAM session, report its logind id on stdout, run the
+/// session as the user, and close PAM when it exits. Run by the daemon only.
+fn run_session_worker(tty_name: String, username: String, is_wayland: bool, exec: String) -> ! {
+    use std::io::{Read, Write};
+    use users::os::unix::UserExt;
+    if users::get_current_uid() != 0 {
+        log::error!("--session-worker is the daemon's; it must run as root");
+        std::process::exit(1);
+    }
+    let mut password = String::new();
+    let _ = std::io::stdin().read_to_string(&mut password);
 
-                if cmd_bin.is_empty() {
-                    log::error!("Error: Resolved execution command is empty.");
-                    std::process::exit(1);
-                }
+    // Stdin back onto the tty the daemon was given: PamSession reads the TTY
+    // item off fd 0, and the console session is a shell on it. Only a name
+    // like "tty1" is opened.
+    let tty_ok = tty_name.len() > 3 && tty_name.starts_with("tty") && tty_name[3..].chars().all(|c| c.is_ascii_digit());
+    if tty_ok {
+        if let Ok(tty) = std::fs::OpenOptions::new().read(true).write(true).open(format!("/dev/{}", tty_name)) {
+            use std::os::unix::io::AsRawFd;
+            unsafe { libc::dup2(tty.as_raw_fd(), 0) };
+        }
+    }
 
-                log::info!("Spawning session: {} with args {:?} for UID={}, GID={}", cmd_bin, cmd_args, user_uid, user_gid);
+    let user = match users::get_user_by_name(&username) {
+        Some(u) => u,
+        None => {
+            log::error!("Error: User '{}' not found in system.", username);
+            std::process::exit(1);
+        }
+    };
 
-                use std::os::unix::process::CommandExt;
-                let mut session_cmd = std::process::Command::new(&cmd_bin);
-                session_cmd
-                    .args(&cmd_args)
-                    .envs(pam_env)
-                    .current_dir(&home_dir)
-                    .env("USER", &username)
-                    .env("LOGNAME", &username)
-                    .env("HOME", home_dir.to_str().unwrap())
-                    .env("SHELL", &shell)
-                    .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
-                    .env("XDG_RUNTIME_DIR", &user_runtime_dir)
-                    .env("XDG_SESSION_TYPE", if is_wayland { "wayland" } else { "x11" })
-                    .env("XDG_SESSION_CLASS", "user")
-                    .stdin(std::process::Stdio::inherit())
-                    .stdout(std::process::Stdio::inherit())
-                    .stderr(std::process::Stdio::inherit());
+    let user_uid = user.uid();
+    let user_gid = user.primary_group_id();
+    let home_dir = user.home_dir().to_path_buf();
+    let shell = user.shell().to_str().unwrap_or("/bin/bash").to_string();
 
-                // Filter out sudo env vars so they don't leak into the user session
-                for key in &["SUDO_USER", "SUDO_UID", "SUDO_GID", "SUDO_COMMAND"] {
-                    session_cmd.env_remove(key);
-                }
+    let user_runtime_dir = format!("/run/user/{}", user_uid);
 
-                let username_c = std::ffi::CString::new(username.clone()).unwrap();
-                unsafe {
-                    session_cmd.pre_exec(move || {
-                        if libc::initgroups(username_c.as_ptr(), user_gid as libc::gid_t) != 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        if libc::setgid(user_gid as libc::gid_t) != 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        if libc::setuid(user_uid as libc::uid_t) != 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        Ok(())
-                    });
-                }
+    // The session's identity, in the worker's own environment before PAM
+    // open_session, for the modules that read it from there.
+    std::env::set_var("USER", &username);
+    std::env::set_var("LOGNAME", &username);
+    std::env::set_var("HOME", home_dir.to_str().unwrap_or(""));
+    std::env::set_var("SHELL", &shell);
+    std::env::set_var("XDG_RUNTIME_DIR", &user_runtime_dir);
 
-                match session_cmd.spawn() {
-                    Ok(mut child_proc) => {
-                        let _ = child_proc.wait();
-                    }
-                    Err(e) => {
-                        log::error!("Failed to launch session: {}", e);
-                    }
-                }
-                log::info!("User session ended.");
-                std::mem::drop(auth);
-                std::process::exit(0);
+    // No fallback service: pam_start does not fail for a missing
+    // stack (PAM falls back to /etc/pam.d/other), so the old
+    // retry on ly's `ly-autologin` / `login` could never run.
+    let service = session_pam_service(&password);
+    let mut auth = match PamSession::new(service, &username, &password, 0, None) {
+        Ok(a) => a,
+        Err(e) => {
+            log::error!("PAM Init Error in session worker: {:?}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let session_type_env = if is_wayland {
+        "XDG_SESSION_TYPE=wayland"
     } else {
-        // Parent process: take the session id the worker reports (EOF once
-        // it closes its end — after reporting, or by exiting), then block
-        // until the worker terminates.
-        let mut session_id = String::new();
-        if have_pipe {
-            use std::io::Read;
-            use std::os::unix::io::FromRawFd;
-            unsafe { libc::close(id_pipe[1]) };
-            let mut reader = unsafe { std::fs::File::from_raw_fd(id_pipe[0]) };
-            let _ = reader.read_to_string(&mut session_id);
-        }
-        let mut status: libc::c_int = 0;
-        unsafe {
-            libc::waitpid(pid, &mut status, 0);
-        }
-        log::info!("Session worker child (PID {}) exited with status: {}", pid, status);
-        terminate_session(session_id.trim());
+        "XDG_SESSION_TYPE=x11"
+    };
+    let _ = auth.putenv(session_type_env);
+    let _ = auth.putenv("XDG_SESSION_CLASS=user");
 
-        // Compositor-requested restart: honor the flag only when it is a
-        // regular file owned by the session user (anyone can create names in
-        // /tmp). symlink_metadata, not metadata: a plain stat follows
-        // symlinks, so another user's link pointing at any file the session
-        // user owns would pass the owner check.
-        if let Ok(meta) = std::fs::symlink_metadata(&flag_path) {
-            use std::os::unix::fs::MetadataExt;
-            let owner_ok = meta.file_type().is_file()
-                && users::get_user_by_name(&username)
-                    .map_or(false, |u| u.uid() == meta.uid());
-            let _ = std::fs::remove_file(&flag_path);
-            if owner_ok {
-                *pending_relaunch = Some((username, exec, is_wayland));
-                return; // relaunching immediately — no VT switch back
+    if let Err(e) = auth.authenticate() {
+        log::error!("PAM Authentication failed in session worker: {:?}", e);
+        std::process::exit(1);
+    }
+
+    if let Err(e) = auth.open_session() {
+        log::error!("PAM Session failed in session worker: {:?}", e);
+        std::process::exit(1);
+    }
+
+    let pam_env = auth.get_env();
+    log::info!("PAM Environment variables: {:?}", pam_env);
+    let session_id = pam_env.iter().find(|(k, _)| k == "XDG_SESSION_ID").map(|(_, v)| v.clone());
+
+    // Report the session to the daemon, then let go of the pipe so its read
+    // ends now rather than when the session does.
+    if let Some(id) = &session_id {
+        let mut out = std::io::stdout();
+        let _ = writeln!(out, "{}{}", SESSION_ID_PREFIX, id);
+        let _ = out.flush();
+    }
+    if let Ok(null) = std::fs::OpenOptions::new().write(true).open("/dev/null") {
+        use std::os::unix::io::AsRawFd;
+        unsafe { libc::dup2(null.as_raw_fd(), 1) };
+    }
+
+    if let Some(id) = &session_id {
+        log::info!("Explicitly activating logind session {} via loginctl...", id);
+        let _ = std::process::Command::new("loginctl")
+            .arg("activate")
+            .arg(id)
+            .status();
+    }
+
+    let (cmd_bin, cmd_args): (String, Vec<String>) = if is_wayland {
+        sanitize_exec(&exec)
+    } else {
+        let (client_bin, client_args) = sanitize_exec(&exec);
+        let xinit_bin = "/usr/sbin/xinit".to_string();
+        let mut args = vec![client_bin];
+        args.extend(client_args);
+        args.push("--".to_string());
+        args.push("-keeptty".to_string());
+        (xinit_bin, args)
+    };
+
+    if cmd_bin.is_empty() {
+        log::error!("Error: Resolved execution command is empty.");
+        std::process::exit(1);
+    }
+
+    log::info!("Spawning session: {} with args {:?} for UID={}, GID={}", cmd_bin, cmd_args, user_uid, user_gid);
+
+    // The console session is a shell on the tty; anything else writes its
+    // stdout/stderr to the user's session log, opened in pre_exec AS THE
+    // USER (a root open in a directory the user owns could be pointed at any
+    // file by a symlink). Until 2026-09-25 the session inherited the
+    // daemon's stdout, which put the user's session output into a
+    // world-readable root log that was truncated at every daemon start.
+    let console = exec.trim() == CONSOLE_SESSION_EXEC;
+    let (log_path, old_path) = session_log_paths(user_uid);
+    let log_c = std::ffi::CString::new(log_path.clone()).unwrap();
+    let old_c = std::ffi::CString::new(old_path).unwrap();
+    let tty_out = || -> std::process::Stdio {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(format!("/dev/{}", tty_name))
+            .map(std::process::Stdio::from)
+            .unwrap_or_else(|_| std::process::Stdio::null())
+    };
+
+    use std::os::unix::process::CommandExt;
+    let mut session_cmd = std::process::Command::new(&cmd_bin);
+    session_cmd
+        .args(&cmd_args)
+        .envs(pam_env)
+        .current_dir(&home_dir)
+        .env("USER", &username)
+        .env("LOGNAME", &username)
+        .env("HOME", home_dir.to_str().unwrap())
+        .env("SHELL", &shell)
+        .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+        .env("XDG_RUNTIME_DIR", &user_runtime_dir)
+        .env("XDG_SESSION_TYPE", if is_wayland { "wayland" } else { "x11" })
+        .env("XDG_SESSION_CLASS", "user")
+        .stdin(std::process::Stdio::inherit());
+    if console {
+        session_cmd.stdout(tty_out()).stderr(tty_out());
+    } else {
+        session_cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        log::info!("Session output goes to {}", log_path);
+    }
+
+    // Filter out sudo env vars so they don't leak into the user session, and
+    // the daemon's JOURNAL_STREAM, which describes the daemon's stderr, not
+    // the session's (systemd-aware programs read it).
+    for key in &["SUDO_USER", "SUDO_UID", "SUDO_GID", "SUDO_COMMAND", "JOURNAL_STREAM"] {
+        session_cmd.env_remove(key);
+    }
+
+    let username_c = std::ffi::CString::new(username.clone()).unwrap();
+    unsafe {
+        session_cmd.pre_exec(move || {
+            if libc::initgroups(username_c.as_ptr(), user_gid as libc::gid_t) != 0 {
+                return Err(std::io::Error::last_os_error());
             }
-            log::warn!("Ignoring restart flag {} with wrong owner", flag_path);
-        }
+            if libc::setgid(user_gid as libc::gid_t) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::setuid(user_uid as libc::uid_t) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if !console {
+                // As the user now. A log that cannot be opened (the runtime
+                // dir not there yet, say) leaves output at /dev/null rather
+                // than failing the login.
+                libc::rename(log_c.as_ptr(), old_c.as_ptr());
+                let fd = libc::open(
+                    log_c.as_ptr(),
+                    libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    0o600,
+                );
+                if fd >= 0 {
+                    libc::dup2(fd, 1);
+                    libc::dup2(fd, 2);
+                    libc::close(fd);
+                }
+            }
+            Ok(())
+        });
+    }
 
-        if let Some(vt) = tty_name.strip_prefix("tty").and_then(|s| s.parse::<u32>().ok()) {
-            log::info!("Switching back to VT {}...", vt);
-            let _ = std::process::Command::new("chvt")
-                .arg(vt.to_string())
-                .status();
+    match session_cmd.spawn() {
+        Ok(mut child_proc) => {
+            let _ = child_proc.wait();
+        }
+        Err(e) => {
+            log::error!("Failed to launch session: {}", e);
         }
     }
+    log::info!("User session ended.");
+    std::mem::drop(auth);
+    std::process::exit(0);
 }
 
 fn main() {
@@ -2041,6 +2163,11 @@ fn main() {
         run_greeter();
     } else if args.len() > 2 && args[1] == "--fprint-auth" {
         run_fprint_helper(&args[2]);
+    } else if let Some((tty, user, is_wayland, exec)) = parse_session_worker_args(&args) {
+        run_session_worker(tty, user, is_wayland, exec);
+    } else if args.len() > 1 && args[1] == "--session-worker" {
+        log::error!("--session-worker takes <tty> <user> <is_wayland> <exec>");
+        std::process::exit(2);
     } else {
         run_daemon();
     }
@@ -2140,6 +2267,52 @@ mod tests {
             }
         }
         assert!(seen >= 4, "the four stacks were read");
+    }
+
+    /// The daemon's argv for the worker and the worker's parse agree, an
+    /// Exec with spaces arrives whole, and no password is in it.
+    #[test]
+    fn session_worker_args_round_trip() {
+        let args = super::session_worker_args("tty1", "lucas", true, "/home/lucas/.local/bin/startcce --logging");
+        assert!(!args.iter().any(|a| a.contains("hunter2")));
+        let mut argv = vec!["/usr/bin/cce-display-manager".to_string()];
+        argv.extend(args);
+        assert_eq!(
+            super::parse_session_worker_args(&argv),
+            Some(("tty1".into(), "lucas".into(), true, "/home/lucas/.local/bin/startcce --logging".into()))
+        );
+        let argv_x11: Vec<String> = ["x", "--session-worker", "tty2", "u", "false", "startx"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(super::parse_session_worker_args(&argv_x11).map(|t| t.2), Some(false));
+        // Anything else is not a worker argv.
+        let short: Vec<String> = ["x", "--session-worker", "tty1"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(super::parse_session_worker_args(&short), None);
+        let greeter: Vec<String> = ["x", "--greeter", "a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(super::parse_session_worker_args(&greeter), None);
+    }
+
+    #[test]
+    fn the_worker_reports_its_session_id_on_one_line() {
+        assert_eq!(super::parse_session_id_line("SESSION_ID 17"), Some("17"));
+        assert_eq!(super::parse_session_id_line("SESSION_ID c3\r"), Some("c3"));
+        assert_eq!(super::parse_session_id_line("SESSION_ID "), None);
+        assert_eq!(super::parse_session_id_line("[INFO] something else"), None);
+    }
+
+    #[test]
+    fn the_session_log_lives_in_the_users_runtime_dir_one_session_back() {
+        assert_eq!(
+            super::session_log_paths(1000),
+            ("/run/user/1000/cce-session.log".to_string(), "/run/user/1000/cce-session.log.old".to_string())
+        );
+    }
+
+    /// The console entry's Exec is the constant the worker keys the tty on,
+    /// so the Bash session keeps its terminal.
+    #[test]
+    fn the_console_session_is_the_one_the_worker_keeps_on_the_tty() {
+        let sessions = super::discover_sessions();
+        let bash = sessions.iter().find(|s| s.name == "Bash Shell").expect("the console entry");
+        assert_eq!(bash.exec, super::CONSOLE_SESSION_EXEC);
     }
 
     #[test]
