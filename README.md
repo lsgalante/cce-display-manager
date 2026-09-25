@@ -21,9 +21,8 @@ conflict). The machine's own session list comes from
   the two fields.
 - **F5** restarts the display manager daemon from `/usr/bin` — how a newly
   installed version takes effect without a reboot.
-- **Ctrl+C** stops the display manager altogether. The unit does not restart
-  it, so the login screen stays gone until a reboot or
-  `sudo systemctl start cce-display-manager@tty1`.
+- **Ctrl+C** exits the display manager; its unit (`Restart=always`) starts it
+  again a second later — a full restart, where F5 only re-execs the daemon.
 
 ## How it is put together
 

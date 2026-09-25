@@ -102,6 +102,15 @@ sealed random one) and raced the unit.
   file owned by that user (`symlink_metadata`), since anyone can create names
   in /tmp.
 
+**The unit restarts the daemon after any exit** (`Restart=always`, since
+2026-09-25). Ctrl+C at the greeter exits it (130 from the greeter → the daemon
+`exit(0)`), which left no login screen until a reboot. A daemon that dies
+mid-session has already ended the session — it leads tty1's session, and the
+compositor and `startcce`, in its foreground process group, take the kernel's
+SIGHUP with the default action (checked in `/proc/<pid>/status`) — so a
+restart then cannot put a greeter beside a live session. If the compositor
+ever starts ignoring SIGHUP, that reasoning has to be redone.
+
 ## Installing and verifying
 
 The login runs `/usr/bin/cce-display-manager`, the units in
@@ -131,8 +140,6 @@ Rollback is Ctrl+Alt+F2 (logind's auto-VTs), restore the `.bak`, reboot.
 
 ## Known gaps
 
-- **Ctrl+C at the greeter stops the daemon** (exit 130 → `exit(0)`), and the
-  unit has no `Restart=`, so the login screen stays gone until a reboot.
 - `WLR_DRM_DEVICES=/dev/dri/card1:/dev/dri/card0` for the greeter's cage is
   this machine's card numbering, hard-coded; `startcce` pins card1 the same way.
 - `busctl monitor` (the resume watchdog) and `chvt` / `loginctl` are shelled
