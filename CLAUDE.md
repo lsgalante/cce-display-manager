@@ -80,6 +80,26 @@ restart, they must be carried into the new session instead.
 daemon at every login that could not unlock the keyring (its password is the
 sealed random one) and raced the unit.
 
+**Ask the CONTEXT which field has focus** (`focused_field`, by widget id —
+the one record `set_focused` writes). `Adapted::focused(ctx)` ignores the
+context and asks the wrapped widget's own flag, which a TextBox does not keep:
+the greeter's Tab and Enter asked it until 2026-09-25, it never matched, so
+Tab went one way only and Enter did nothing in either field. The first
+frame's focus comes from `initial_focus` for the same reason.
+
+**The runner reaches the widgets through `ui_context()`**, which the greeter
+must implement. Before each frame the runner shapes every registered widget
+(`prepare_text`), and that is what records a TextBox's glyph positions;
+without the hook none were recorded and the caret fell back to a column grid
+off an inked-width estimate, drifting off the typed text.
+
+**F1 / F2 run `systemctl poweroff` / `reboot`** (the greeter is root). Never
+press them in a shadow greeter run as yourself — polkit lets an active local
+session power off unasked, so it would take the machine down. Put a fake
+`systemctl` first on the greeter's PATH instead; that is how they were
+tested. A power key bumps `auth_request_id` like any new attempt, or the
+fingerprint scan it cancels reports "helper exited" over its status line.
+
 ## Where things go
 
 - **Session output** → `/run/user/<uid>/cce-session.log` (previous one `.old`),

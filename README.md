@@ -12,13 +12,17 @@ conflict). The machine's own session list comes from
 
 ## Using the greeter
 
-- Type the username (the last user is filled in) and the password, then Enter.
+- Type the username (the last user is filled in) and the password, then
+  Enter — from either field; Enter in the username with no password yet moves
+  to the password.
 - **Fingerprint**: with the username filled in and fprintd enabled for
   `cce-display-manager-fprint`, a scan starts on its own; Enter with an empty
   password starts one again. Submitting a password cancels a scan in
   progress.
 - **Up / Down** or **Ctrl+P / Ctrl+N** pick the session; **Tab** moves between
   the two fields.
+- **F1** powers the machine off and **F2** reboots it, at once (ly's keys,
+  the login screen this one replaced). The footer lists the keys.
 - **F5** restarts the display manager daemon from `/usr/bin` — how a newly
   installed version takes effect without a reboot.
 - **Ctrl+C** exits the display manager; its unit (`Restart=always`) starts it

@@ -347,9 +347,50 @@ struct State {
     /// the worker that partial password sent it down the password PAM stack
     /// to fail the login the greeter had just accepted.
     auth_password: String,
+    /// The field to focus on the first frame — see `relink_tree`.
+    initial_focus: Option<Field>,
+}
+
+/// The greeter's two text fields.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Field {
+    Username,
+    Password,
 }
 
 impl State {
+    /// Which field has the keyboard, asked of the CONTEXT by id — the one
+    /// record `set_focused` writes. NOT `Adapted::focused(ctx)`, which ignores
+    /// the context and asks the wrapped widget's own flag: the greeter's Tab
+    /// and Enter asked that until 2026-09-25, it never matched, and so Tab
+    /// went one way only and Enter in either field did nothing.
+    fn focused_field(&self) -> Option<Field> {
+        let id = self.ui_context.focused_widget?;
+        if id == self.username_box.id() {
+            Some(Field::Username)
+        } else if id == self.password_box.id() {
+            Some(Field::Password)
+        } else {
+            None
+        }
+    }
+
+    /// Give `field` the keyboard: the context's focus and both boxes' flags.
+    fn focus_field(&mut self, field: Field) {
+        match field {
+            Field::Username => {
+                self.ui_context.set_focused(&mut self.username_box);
+                self.password_box.unfocus();
+                self.username_box.focus();
+            }
+            Field::Password => {
+                self.ui_context.set_focused(&mut self.password_box);
+                self.username_box.unfocus();
+                self.password_box.focus();
+            }
+        }
+    }
+
     fn widgets_iter(&self) -> Vec<&dyn WidgetHost> {
         vec![
             &self.bg,
@@ -379,15 +420,12 @@ impl State {
         focus::link_parent_child(&mut self.card, &mut self.password_box, ctx);
         focus::link_parent_child(&mut self.card, &mut self.login_btn, ctx);
         focus::link_parent_child(&mut self.card, &mut self.status_lbl, ctx);
-        // Initial focus: new() only set the box's own flag; point the context at the live
-        // widget carrying it. Never fires once a runtime set_focused/clear_focus has run
-        // (clear_focus also clears both flags).
-        if self.ui_context.focused_widget.is_none() {
-            if self.username_box.base().focused {
-                self.ui_context.set_focused(&mut self.username_box);
-            } else if self.password_box.base().focused {
-                self.ui_context.set_focused(&mut self.password_box);
-            }
+        // Initial focus, on the first frame: new() cannot register it (its widgets are
+        // about to move). It used to be read back off the boxes' own `base().focused`
+        // flags, which a TextBox does not keep, so the context started with NO focus —
+        // the caret showed in the password box but the context held nothing.
+        if let Some(field) = self.initial_focus.take() {
+            self.focus_field(field);
         }
     }
 
@@ -586,6 +624,20 @@ impl State {
 impl cce_ui::engine::Application for State {
     type Message = String;
 
+    /// The runner reaches the widget tree through this. Without it (until
+    /// 2026-09-25) the runner never shaped the text boxes before a frame —
+    /// its step 0 walks `ui_context().tree` — so they recorded no glyph
+    /// positions, and the caret fell back to a per-column grid from an
+    /// inked-width estimate that drifted off the typed text, a little more
+    /// with every character.
+    fn ui_context(&self) -> Option<&cce_ui::context::UiContext> {
+        Some(&self.ui_context)
+    }
+
+    fn ui_context_mut(&mut self) -> Option<&mut cce_ui::context::UiContext> {
+        Some(&mut self.ui_context)
+    }
+
     fn new(_qh: &QueueHandle<cce_ui::engine::EngineState<Self>>, _sender: channel::Sender<Self::Message>) -> Self {
         let (auth_sender, auth_receiver) = channel::channel::<AuthEvent>();
 
@@ -653,6 +705,7 @@ impl cce_ui::engine::Application for State {
             auth_receiver: Some(auth_receiver),
             fprint_child: None,
             auth_password: String::new(),
+            initial_focus: None,
         };
 
         // The widget tree is NOT linked here: `app` is a stack local inside new(), so any
@@ -662,11 +715,12 @@ impl cce_ui::engine::Application for State {
         // (which move with the struct) are set here; relink_tree points focused_widget at
         // the flagged box.
         let has_username = !app.username_box.text.trim().to_string().is_empty();
-        if has_username {
-            app.password_box.focus();
-        } else {
-            app.username_box.focus();
+        let first = if has_username { Field::Password } else { Field::Username };
+        match first {
+            Field::Password => app.password_box.focus(),
+            Field::Username => app.username_box.focus(),
         }
+        app.initial_focus = Some(first);
 
         // Start the background fingerprint attempt if the username is
         // prepopulated and fprintd is enabled — unless this greeter is a rapid
@@ -750,7 +804,7 @@ impl cce_ui::engine::Application for State {
         }
 
         pc.text_with(
-            "Press Tab to switch fields • Session selector: Click current session label".to_string(),
+            KEY_LEGEND.to_string(),
             20.0,
             self.height - 24.0,
             11.0,
@@ -843,7 +897,7 @@ impl cce_ui::engine::Application for State {
                                     // user nothing, least of all how to retry.
                                     format!("{} — press Enter to scan again, or type password", fprint_failure_text(&err_msg))
                                 } else {
-                                    err_msg
+                                    password_failure_text(&err_msg)
                                 };
                                 app.status_lbl.is_error = true;
                                 app.password_box.text.clear();
@@ -911,6 +965,33 @@ impl cce_ui::engine::Application for State {
             std::process::exit(130);
         }
 
+        // F1 / F2: power off / reboot — ly's keys, which this machine's
+        // login screen used before this one. Immediate, as there: nobody is
+        // logged in at the greeter, so there is nothing to lose.
+        if event.state == ElementState::Pressed {
+            let power = match logical_key {
+                Key::Named(NamedKey::F1) => Some(PowerAction::PowerOff),
+                Key::Named(NamedKey::F2) => Some(PowerAction::Reboot),
+                _ => None,
+            };
+            if let Some(action) = power {
+                // A new attempt number, as a typed password takes: the scan
+                // being cancelled reports "helper exited" as it dies, and
+                // without the bump that late failure overwrote this status.
+                self.cancel_fprint_auth();
+                self.auth_request_id += 1;
+                self.is_authenticating = false;
+                let (text, is_error) = match run_power_action(action) {
+                    Ok(()) => (action.progress().to_string(), false),
+                    Err(e) => (format!("Could not {}: {}", action.verb(), e), true),
+                };
+                self.status_lbl.text = text;
+                self.status_lbl.is_error = is_error;
+                *needs_rebuild = true;
+                return None;
+            }
+        }
+
         // Check for F5 to request daemon restart
         if logical_key == &Key::Named(NamedKey::F5) {
             log::info!("F5 pressed. Requesting daemon restart.");
@@ -967,30 +1048,32 @@ impl cce_ui::engine::Application for State {
                 self.session_list.hovered_idx = None;
                 changed = true;
             } else if logical_key == &Key::Named(NamedKey::Tab) {
-                let is_user_focused = self.username_box.focused(&self.ui_context);
-                if is_user_focused {
-                    self.ui_context.set_focused(&mut self.password_box);
-                    self.username_box.unfocus();
-                    self.password_box.focus();
-                } else {
-                    self.ui_context.set_focused(&mut self.username_box);
-                    self.password_box.unfocus();
-                    self.username_box.focus();
+                let next = match self.focused_field() {
+                    Some(Field::Username) => Field::Password,
+                    _ => Field::Username,
+                };
+                self.focus_field(next);
+                changed = true;
+            } else if logical_key == &Key::Named(NamedKey::Enter) {
+                // Enter logs in from anywhere — except from the username with no
+                // password yet, where it moves on to the password (trigger_auth
+                // would start a fingerprint scan or say the password is empty).
+                // The key goes to the focused box first so it commits its edit.
+                let field = self.focused_field();
+                let root = match field {
+                    Some(Field::Username) => Some(self.username_box.id()),
+                    Some(Field::Password) => Some(self.password_box.id()),
+                    None => None,
+                };
+                if let Some(root) = root {
+                    let kev = cce_ui::widget::Event::KeyInput(event.clone());
+                    let _ = self.ui_context.propagate_event(&kev, root);
                 }
-                changed = true;
-            } else if logical_key == &Key::Named(NamedKey::Enter) && self.password_box.focused(&self.ui_context) {
-                let kev = cce_ui::widget::Event::KeyInput(event.clone());
-                let root = self.password_box.id();
-                let _ = self.ui_context.propagate_event(&kev, root);
-                self.trigger_auth();
-                changed = true;
-            } else if logical_key == &Key::Named(NamedKey::Enter) && self.username_box.focused(&self.ui_context) {
-                let kev = cce_ui::widget::Event::KeyInput(event.clone());
-                let root = self.username_box.id();
-                let _ = self.ui_context.propagate_event(&kev, root);
-                self.ui_context.set_focused(&mut self.password_box);
-                self.username_box.unfocus();
-                self.password_box.focus();
+                if field == Some(Field::Username) && self.password_box.text.is_empty() {
+                    self.focus_field(Field::Password);
+                } else {
+                    self.trigger_auth();
+                }
                 changed = true;
             } else {
                 if self.widgets_keyboard_input(event) {
@@ -1008,6 +1091,50 @@ impl cce_ui::engine::Application for State {
 
     fn clear_color(&self) -> [f32; 4] {
         [0.03, 0.03, 0.05, 1.0]
+    }
+}
+
+/// What the footer says the keys do — every key the greeter answers to that
+/// is not obvious from the fields themselves.
+const KEY_LEGEND: &str = "F1 Power off  ·  F2 Reboot  ·  F5 Restart login screen  ·  Tab Switch field  ·  Up/Down Session";
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PowerAction {
+    PowerOff,
+    Reboot,
+}
+
+impl PowerAction {
+    /// The `systemctl` verb.
+    fn command(self) -> &'static str {
+        match self {
+            PowerAction::PowerOff => "poweroff",
+            PowerAction::Reboot => "reboot",
+        }
+    }
+    fn verb(self) -> &'static str {
+        match self {
+            PowerAction::PowerOff => "power off",
+            PowerAction::Reboot => "reboot",
+        }
+    }
+    fn progress(self) -> &'static str {
+        match self {
+            PowerAction::PowerOff => "Powering off…",
+            PowerAction::Reboot => "Rebooting…",
+        }
+    }
+}
+
+/// `systemctl poweroff` / `reboot`. The greeter runs as root, so no polkit
+/// agent is needed; systemctl returns once the job is queued. `Err` carries
+/// what to show on the status line.
+fn run_power_action(action: PowerAction) -> Result<(), String> {
+    log::info!("{} requested at the greeter", action.command());
+    match std::process::Command::new("systemctl").arg(action.command()).status() {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!("systemctl {} exited {}", action.command(), s)),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -1033,6 +1160,18 @@ const FPRINT_AUTOSTART_STAMP: &str = "/run/cce-display-manager/fprint-autostart"
 
 /// Human text for the verdict the fingerprint helper reports (a PamReturnCode
 /// Debug name, or a helper-level message).
+/// A failed password check in words. The status line used to show PAM's
+/// code verbatim — `AUTH_ERR` for a wrong password.
+fn password_failure_text(code: &str) -> String {
+    match code {
+        "AUTH_ERR" | "USER_UNKNOWN" => "Incorrect username or password".to_string(),
+        "MAXTRIES" | "PERM_DENIED" => "Too many failed attempts — wait and try again".to_string(),
+        "ACCT_EXPIRED" | "NEW_AUTHTOK_REQD" => "This account's password has expired".to_string(),
+        "AUTHINFO_UNAVAIL" | "SERVICE_ERR" | "SYSTEM_ERR" => "Could not check the password (system error)".to_string(),
+        other => format!("Login failed ({})", other),
+    }
+}
+
 fn fprint_failure_text(code: &str) -> String {
     match code {
         // pam_fprintd: verify timed out, or the user has no enrolled prints.
@@ -2313,6 +2452,33 @@ mod tests {
         let sessions = super::discover_sessions();
         let bash = sessions.iter().find(|s| s.name == "Bash Shell").expect("the console entry");
         assert_eq!(bash.exec, super::CONSOLE_SESSION_EXEC);
+    }
+
+    /// The footer names every key the greeter answers to beyond the fields
+    /// themselves — the function keys above all, which nothing else reveals.
+    #[test]
+    fn the_key_legend_names_the_function_keys() {
+        for key in ["F1", "F2", "F5", "Tab"] {
+            assert!(super::KEY_LEGEND.contains(key), "{key} missing from {:?}", super::KEY_LEGEND);
+        }
+        assert!(super::KEY_LEGEND.contains("Power off") && super::KEY_LEGEND.contains("Reboot"));
+    }
+
+    #[test]
+    fn power_keys_run_the_matching_systemctl_verb() {
+        assert_eq!(super::PowerAction::PowerOff.command(), "poweroff");
+        assert_eq!(super::PowerAction::Reboot.command(), "reboot");
+    }
+
+    /// A wrong username and a wrong password read the same — the greeter
+    /// does not say which names exist — and no raw PAM code reaches the
+    /// status line for the common failures.
+    #[test]
+    fn password_failures_read_as_words() {
+        assert_eq!(super::password_failure_text("AUTH_ERR"), super::password_failure_text("USER_UNKNOWN"));
+        for code in ["AUTH_ERR", "USER_UNKNOWN", "MAXTRIES", "ACCT_EXPIRED", "SYSTEM_ERR"] {
+            assert!(!super::password_failure_text(code).contains(code), "{code}");
+        }
     }
 
     #[test]
