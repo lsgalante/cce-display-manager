@@ -1738,9 +1738,18 @@ fn ensure_vt_active(tty_name: &str) {
 /// the logind session `closing` — with logind's default KillUserProcesses=no,
 /// every process the session started and did not reap lives on in its scope.
 /// Every login leaked that way (by 2026-09-25, eight sessions stuck `closing`,
-/// held open by 16 orphaned 1Password helpers, 1.9 GB). Terminating from the
-/// DAEMON, not the worker: pam_systemd moved the worker into the session's
-/// scope, so it would be terminating itself.
+/// held open by 16 orphaned 1Password helpers, 1.9 GB). Done from the DAEMON,
+/// not the worker: pam_systemd moved the worker into the session's scope.
+///
+/// `kill-session`, NOT `terminate-session`. Once the leader has exited, logind
+/// has abandoned the scope, and TerminateSession on such a session does
+/// nothing at all — no error, no journal line, the session stays `closing`
+/// (measured on the eight leaked ones). Signalling the scope's processes does
+/// work: SIGTERM ended every orphaned helper within a second. SIGKILL follows
+/// for anything still there after two seconds. Escalation is polled here
+/// rather than timed on a thread, because the daemon forks the next session
+/// worker right after this returns, and a thread busy spawning `loginctl` at
+/// that moment is the fork-in-a-threaded-process hazard that wedged logins.
 ///
 /// Also on a compositor-restart relaunch: the new compositor starts its
 /// clients fresh in the new session (nothing survives into it from the old
@@ -1750,16 +1759,39 @@ fn ensure_vt_active(tty_name: &str) {
 fn terminate_session(session_id: &str) {
     if !valid_session_id(session_id) {
         if !session_id.is_empty() {
-            log::warn!("not terminating session with unexpected id {:?}", session_id);
+            log::warn!("not ending session with unexpected id {:?}", session_id);
         }
         return;
     }
-    match std::process::Command::new("loginctl").args(["terminate-session", session_id]).status() {
-        Ok(s) if s.success() => log::info!("Terminated logind session {}", session_id),
-        // Already gone (every process exited on its own) is the good case.
-        Ok(s) => log::info!("loginctl terminate-session {} exited {}", session_id, s),
-        Err(e) => log::warn!("could not run loginctl to end session {}: {}", session_id, e),
+    let session_exists = || {
+        std::process::Command::new("loginctl")
+            .args(["show-session", session_id, "--property=Id"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    let kill = |signal: &str| {
+        let _ = std::process::Command::new("loginctl")
+            .args(["kill-session", session_id, "--signal", signal])
+            .stderr(std::process::Stdio::null())
+            .status();
+    };
+    // Nothing left running: logind already dropped it — the good case.
+    if !session_exists() {
+        return;
     }
+    log::info!("Session {} left processes behind; sending SIGTERM", session_id);
+    kill("SIGTERM");
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if !session_exists() {
+            log::info!("Session {} ended", session_id);
+            return;
+        }
+    }
+    log::warn!("Session {} still running 2s after SIGTERM; sending SIGKILL", session_id);
+    kill("SIGKILL");
 }
 
 /// Fork the session worker (PAM open_session + user-session spawn) and wait
