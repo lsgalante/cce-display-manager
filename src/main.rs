@@ -1052,12 +1052,17 @@ fn authenticate_user(request_id: u64, username: String, password: String, sender
             }
         };
 
+        // authenticate() + acct_mgmt() is the whole credential check. Do NOT
+        // open a PAM session here: the daemon's session worker
+        // (launch_session) opens the real one. The greeter used to call
+        // open_session() too, which registered a throwaway logind session
+        // with this process as leader and ran pam_gnome_keyring's
+        // auto_start — a fork() out of this multi-threaded Vulkan process
+        // that then setuid()s and exec()s gnome-keyring-daemon. That child
+        // could wedge before exec (seen 2026-09-18), and gkr-pam waits on
+        // its pipes with no timeout, so the login froze on
+        // "Authenticating..." after the password had been accepted.
         if let Err(e) = auth.authenticate() {
-            let _ = sender.send(AuthEvent::Failure { request_id, err_msg: format!("{:?}", e) });
-            return;
-        }
-
-        if let Err(e) = auth.open_session() {
             let _ = sender.send(AuthEvent::Failure { request_id, err_msg: format!("{:?}", e) });
             return;
         }
