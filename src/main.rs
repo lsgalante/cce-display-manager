@@ -43,6 +43,31 @@ fn parse_auth_success(line: &str) -> Option<(String, String, bool, String)> {
     Some((username, exec, is_wayland, password))
 }
 
+/// The greeter's half of [`parse_auth_success`]: the line it prints on stdout
+/// for the daemon. The password goes VERBATIM — no trimming: a password with a
+/// leading or trailing space is a password, and trimming it made that account
+/// unable to log in here at all.
+fn auth_success_line(username: &str, exec: &str, is_wayland: bool, password: &str) -> String {
+    format!("AUTH_SUCCESS|{}|{}|{}|{}", username, exec, is_wayland, password)
+}
+
+/// The PAM service the session worker opens the session on. An empty password
+/// is the fingerprint path (or a compositor-restart relaunch): the greeter
+/// already verified the user, so the session opens on the autologin stack.
+fn session_pam_service(password: &str) -> &'static str {
+    if password.is_empty() {
+        "cce-display-manager-autologin"
+    } else {
+        "cce-display-manager-password"
+    }
+}
+
+/// A logind session id as `XDG_SESSION_ID` carries it — only then is it passed
+/// to `loginctl`. Ids are short alphanumeric strings ("15", "c3").
+fn valid_session_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 32 && id.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
 fn sanitize_exec(exec: &str) -> (String, Vec<String>) {
     let mut parts = Vec::new();
     for part in exec.split_whitespace() {
@@ -315,6 +340,13 @@ struct State {
     // interrupted, but a process can be killed — and killing it drops its
     // D-Bus connection, which is what makes fprintd release the sensor claim.
     fprint_child: Option<std::process::Child>,
+    /// The password the in-flight authentication is checking: what the
+    /// daemon's session worker must be handed on success. Empty for a
+    /// fingerprint attempt. NOT the password box's text at success time —
+    /// a fingerprint can succeed while a password is half-typed, and handing
+    /// the worker that partial password sent it down the password PAM stack
+    /// to fail the login the greeter had just accepted.
+    auth_password: String,
 }
 
 impl State {
@@ -487,7 +519,7 @@ impl State {
     }
     fn trigger_auth(&mut self) {
         let username = self.username_box.text.trim().to_string();
-        let password = self.password_box.text.trim().to_string();
+        let password = self.password_box.text.clone();
 
         if username.is_empty() {
             self.status_lbl.text = "Username cannot be empty".to_string();
@@ -508,6 +540,7 @@ impl State {
             // running; release the sensor so it is not left claimed.
             self.cancel_fprint_auth();
             self.auth_request_id += 1;
+            self.auth_password = password.clone();
             self.status_lbl.text = "Authenticating...".to_string();
             self.status_lbl.is_error = false;
             self.is_authenticating = true;
@@ -521,6 +554,7 @@ impl State {
         let username = self.username_box.text.trim().to_string();
         self.cancel_fprint_auth();
         self.auth_request_id += 1;
+        self.auth_password.clear();
         self.status_lbl.text = "Scan finger to login or type password".to_string();
         self.status_lbl.is_error = false;
         self.is_authenticating = true;
@@ -618,6 +652,7 @@ impl cce_ui::engine::Application for State {
             auth_sender,
             auth_receiver: Some(auth_receiver),
             fprint_child: None,
+            auth_password: String::new(),
         };
 
         // The widget tree is NOT linked here: `app` is a stack local inside new(), so any
@@ -792,7 +827,7 @@ impl cce_ui::engine::Application for State {
                                 app.status_lbl.is_error = false;
                                 app.login_success = true;
                                 if let Some(session) = app.session_list.selected_session() {
-                                    println!("AUTH_SUCCESS|{}|{}|{}|{}", app.username_box.text.trim(), session.exec, session.is_wayland, app.password_box.text.trim());
+                                    println!("{}", auth_success_line(app.username_box.text.trim(), &session.exec, session.is_wayland, &app.auth_password));
                                     std::process::exit(0);
                                 }
                             }
@@ -1697,6 +1732,36 @@ fn ensure_vt_active(tty_name: &str) {
     log::warn!("could not make {} the active VT", tty_name);
 }
 
+/// End a finished session's logind session: stop whatever it left running.
+///
+/// The worker closes PAM when the session's command exits, but that only marks
+/// the logind session `closing` — with logind's default KillUserProcesses=no,
+/// every process the session started and did not reap lives on in its scope.
+/// Every login leaked that way (by 2026-09-25, eight sessions stuck `closing`,
+/// held open by 16 orphaned 1Password helpers, 1.9 GB). Terminating from the
+/// DAEMON, not the worker: pam_systemd moved the worker into the session's
+/// scope, so it would be terminating itself.
+///
+/// Also on a compositor-restart relaunch: the new compositor starts its
+/// clients fresh in the new session (nothing survives into it from the old
+/// scope — the leaked sessions held nothing but the orphans), so the old one
+/// has nothing worth keeping. If clients ever reconnect ACROSS a restart, they
+/// will have to be carried into the new session rather than left in this one.
+fn terminate_session(session_id: &str) {
+    if !valid_session_id(session_id) {
+        if !session_id.is_empty() {
+            log::warn!("not terminating session with unexpected id {:?}", session_id);
+        }
+        return;
+    }
+    match std::process::Command::new("loginctl").args(["terminate-session", session_id]).status() {
+        Ok(s) if s.success() => log::info!("Terminated logind session {}", session_id),
+        // Already gone (every process exited on its own) is the good case.
+        Ok(s) => log::info!("loginctl terminate-session {} exited {}", session_id, s),
+        Err(e) => log::warn!("could not run loginctl to end session {}: {}", session_id, e),
+    }
+}
+
 /// Fork the session worker (PAM open_session + user-session spawn) and wait
 /// for it — shared by the greeter login path and the compositor-restart
 /// relaunch path. If the session left a restart flag (`ccectl
@@ -1719,11 +1784,31 @@ fn launch_session(
 
     ensure_vt_active(tty_name);
 
+    // The worker reports its logind session id up this pipe, so that once the
+    // session is over the daemon can end it (see `terminate_session`).
+    // O_CLOEXEC: the user session the worker execs must not inherit the write
+    // end, or the daemon's read would wait on every process the session ever
+    // spawns.
+    let mut id_pipe = [-1 as libc::c_int; 2];
+    let have_pipe = unsafe { libc::pipe2(id_pipe.as_mut_ptr(), libc::O_CLOEXEC) } == 0;
+    if !have_pipe {
+        log::warn!("no session-id pipe ({}); the session will not be ended on exit", std::io::Error::last_os_error());
+    }
+
     let pid = unsafe { libc::fork() };
     if pid < 0 {
         log::error!("Fork failed: {}", std::io::Error::last_os_error());
+        if have_pipe {
+            unsafe {
+                libc::close(id_pipe[0]);
+                libc::close(id_pipe[1]);
+            }
+        }
         return;
     } else if pid == 0 {
+                if have_pipe {
+                    unsafe { libc::close(id_pipe[0]) };
+                }
                 // Child process: execute PAM session and spawn the compositor/user session
                 let user = match users::get_user_by_name(&username) {
                     Some(u) => u,
@@ -1748,26 +1833,15 @@ fn launch_session(
                 std::env::set_var("SHELL", &shell);
                 std::env::set_var("XDG_RUNTIME_DIR", &user_runtime_dir);
 
-                let service = if password.is_empty() {
-                    "cce-display-manager-autologin"
-                } else {
-                    "cce-display-manager-password"
-                };
+                // No fallback service: pam_start does not fail for a missing
+                // stack (PAM falls back to /etc/pam.d/other), so the old
+                // retry on ly's `ly-autologin` / `login` could never run.
+                let service = session_pam_service(&password);
                 let mut auth = match PamSession::new(service, &username, &password, 0, None) {
                     Ok(a) => a,
-                    Err(_) => {
-                        let fallback_service = if password.is_empty() {
-                            "ly-autologin"
-                        } else {
-                            "login"
-                        };
-                        match PamSession::new(fallback_service, &username, &password, 0, None) {
-                            Ok(a) => a,
-                            Err(e) => {
-                                log::error!("PAM Init Error in child: {:?}", e);
-                                std::process::exit(1);
-                            }
-                        }
+                    Err(e) => {
+                        log::error!("PAM Init Error in child: {:?}", e);
+                        std::process::exit(1);
                     }
                 };
 
@@ -1791,6 +1865,16 @@ fn launch_session(
 
                 let pam_env = auth.get_env();
                 log::info!("PAM Environment variables: {:?}", pam_env);
+
+                if have_pipe {
+                    if let Some((_, session_id)) = pam_env.iter().find(|(k, _)| k == "XDG_SESSION_ID") {
+                        let line = format!("{}\n", session_id);
+                        unsafe {
+                            libc::write(id_pipe[1], line.as_ptr() as *const libc::c_void, line.len());
+                        }
+                    }
+                    unsafe { libc::close(id_pipe[1]) };
+                }
 
                 if let Some((_, session_id)) = pam_env.iter().find(|(k, _)| k == "XDG_SESSION_ID") {
                     log::info!("Explicitly activating logind session {} via loginctl...", session_id);
@@ -1870,12 +1954,23 @@ fn launch_session(
                 std::mem::drop(auth);
                 std::process::exit(0);
     } else {
-        // Parent process: block until the session worker child terminates
+        // Parent process: take the session id the worker reports (EOF once
+        // it closes its end — after reporting, or by exiting), then block
+        // until the worker terminates.
+        let mut session_id = String::new();
+        if have_pipe {
+            use std::io::Read;
+            use std::os::unix::io::FromRawFd;
+            unsafe { libc::close(id_pipe[1]) };
+            let mut reader = unsafe { std::fs::File::from_raw_fd(id_pipe[0]) };
+            let _ = reader.read_to_string(&mut session_id);
+        }
         let mut status: libc::c_int = 0;
         unsafe {
             libc::waitpid(pid, &mut status, 0);
         }
         log::info!("Session worker child (PID {}) exited with status: {}", pid, status);
+        terminate_session(session_id.trim());
 
         // Compositor-requested restart: honor the flag only when it is a
         // regular file owned by the session user (anyone can create names in
@@ -1959,6 +2054,60 @@ mod tests {
         assert_eq!(parse_auth_success("AUTH_SUCCESS|lucas|startcce"), None);
         assert_eq!(parse_auth_success("AUTH_SUCCESS|"), None);
         assert_eq!(parse_auth_success("NOT_A_THING|x|y|z|w"), None);
+    }
+
+    /// The greeter's line and the daemon's parse agree, and a password is
+    /// carried exactly — spaces at either end, and the `|` separator, intact.
+    #[test]
+    fn auth_success_round_trips_the_password_verbatim() {
+        for pw in ["hunter2", " leading", "trailing ", "  both  ", "a|b", ""] {
+            let line = super::auth_success_line("lucas", "startcce", true, pw);
+            assert_eq!(
+                parse_auth_success(&line),
+                Some(("lucas".into(), "startcce".into(), true, pw.to_string())),
+                "{pw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_password_opens_on_the_autologin_stack() {
+        assert_eq!(super::session_pam_service(""), "cce-display-manager-autologin");
+        assert_eq!(super::session_pam_service("x"), "cce-display-manager-password");
+        assert_eq!(super::session_pam_service(" "), "cce-display-manager-password");
+    }
+
+    #[test]
+    fn only_plain_session_ids_reach_loginctl() {
+        for ok in ["15", "c3", "2"] {
+            assert!(super::valid_session_id(ok), "{ok}");
+        }
+        for bad in ["", "15 --all", "-h", "1;rm", "../x", &"9".repeat(40)] {
+            assert!(!super::valid_session_id(bad), "{bad}");
+        }
+    }
+
+    /// One keyring provider: the TPM-sealed gnome-keyring-daemon unit (see
+    /// the README). pam_gnome_keyring in a login stack started a SECOND
+    /// daemon at every login, which failed to unlock (the keyring's password
+    /// is the sealed one, not the login password) and raced the unit.
+    #[test]
+    fn no_pam_stack_starts_a_keyring() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/pam");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(dir).expect("pam/") {
+            let path = entry.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            seen += 1;
+            for line in text.lines().filter(|l| !l.trim_start().starts_with('#')) {
+                assert!(
+                    !line.contains("pam_gnome_keyring") && !line.contains("pam_kwallet"),
+                    "{}: {line}",
+                    path.display()
+                );
+            }
+        }
+        assert!(seen >= 4, "the four stacks were read");
     }
 
     #[test]

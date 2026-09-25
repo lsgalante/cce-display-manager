@@ -1,19 +1,18 @@
 #%PAM-1.0
+# No pam_gnome_keyring here, deliberately: the login keyring is unlocked by
+# the TPM-sealed gnome-keyring-daemon unit (README, "Login keyring"), the one
+# provider. This module started a second daemon at every login, which could
+# not unlock the keyring (its password is the sealed one) and raced the unit.
+
 # Legacy service name. The greeter no longer authenticates against it: the
 # fingerprint attempt uses cce-display-manager-fprint and typed passwords use
 # cce-display-manager-password. pam_fprintd was removed from here so that
 # nothing can turn a fingerprint miss into a pam_unix/pam_faillock failure.
 
 auth       include      system-local-login
--auth      optional     pam_gnome_keyring.so
--auth      optional     pam_kwallet5.so
-
 
 account    include      system-local-login
 
 password   include      system-local-login
--password  optional     pam_gnome_keyring.so use_authtok
 
 session    include      system-local-login
--session   optional     pam_gnome_keyring.so auto_start
--session   optional     pam_kwallet5.so      auto_start
