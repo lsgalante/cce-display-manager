@@ -29,13 +29,18 @@ TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT INT TERM
 
 # The TPM serializes, so a request racing another user of it fails
 # transiently. Retry the whole unseal, primary key included.
+#
+# stderr goes to a file, never into PW: tpm2-tools and the TSS print warnings
+# on stderr even when the unseal succeeds, and with `2>&1` (until 2026-10-02)
+# any such line was prepended to the password, the unlock failed and the
+# keyring stayed locked.
 n=0
 until PW=$( { tpm2_createprimary -Q -C o -g sha256 -G ecc -c "$TMP/primary.ctx" \
               && tpm2_load -Q -C "$TMP/primary.ctx" -u "$PUB" -r "$PRIV" -c "$TMP/seal.ctx" \
-              && tpm2_unseal -c "$TMP/seal.ctx"; } 2>&1 ); do
+              && tpm2_unseal -c "$TMP/seal.ctx"; } 2>"$TMP/err" ); do
     n=$((n + 1))
     if [ "$n" -ge 5 ]; then
-        echo "TPM unseal failed after $n attempts: $PW" >&2
+        echo "TPM unseal failed after $n attempts: $(cat "$TMP/err")" >&2
         exit 1
     fi
     sleep 1
