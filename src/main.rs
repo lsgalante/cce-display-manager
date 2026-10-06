@@ -461,17 +461,23 @@ impl State {
         // Child components inside login card
         let content_x = card_x + 30.0;
         
+        // The boxes' blocks are their detached label strip plus the toolkit's
+        // textbox height.
+        let tb_h = cce_ui::layout::textbox_height();
+        let btn_h = cce_ui::layout::button_height();
+
         // Username text box
-        self.username_box.set_rect(content_x, card_y + 80.0, 300.0, 36.0);
+        self.username_box.set_rect(content_x, card_y + 80.0, 300.0, tb_h + self.username_box.label_strip());
         
         // Password password box
-        self.password_box.set_rect(content_x, card_y + 145.0, 300.0, 36.0);
+        self.password_box.set_rect(content_x, card_y + 145.0, 300.0, tb_h + self.password_box.label_strip());
 
         // Login button (full-width of the contents)
-        self.login_btn.set_rect(content_x, card_y + 205.0, 300.0, 36.0);
+        let login_y = card_y + 205.0;
+        self.login_btn.set_rect(content_x, login_y, 300.0, btn_h);
 
         // Status message
-        self.status_lbl.set_rect(content_x, card_y + 252.0, 300.0, 20.0);
+        self.status_lbl.set_rect(content_x, login_y + btn_h + 11.0, 300.0, 20.0);
 
         // Session list on top left
         let list_w = 260.0;
@@ -677,7 +683,7 @@ impl cce_ui::engine::Application for State {
         let card = LoginCard::new();
         let username_box = TextBox::new(current_user).with_label("USERNAME");
         let password_box = TextBox::new(String::new()).with_password(true).with_label("PASSWORD");
-        let login_btn = Button::new(0.0, 0.0, 300.0, 36.0).with_label("Log In");
+        let login_btn = Button::new(0.0, 0.0, 300.0, cce_ui::layout::button_height()).with_label("Log In");
         let status_lbl = StatusLabel::new("Enter password to start".to_string());
         let mut session_list = SessionList::new(sessions);
         session_list.selected_idx = selected_idx;
