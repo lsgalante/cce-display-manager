@@ -932,17 +932,37 @@ impl cce_ui::engine::Application for State {
         let ly = pos.y as f32;
         self.cursor_x = lx;
         self.cursor_y = ly;
+        // The shared context menu (the username / password box's) gets the
+        // pointer to itself while open: its row highlight.
+        if cce_ui::widget::context_menu::is_visible() {
+            if cce_ui::widget::context_menu::cursor_moved(lx, ly) {
+                *needs_rebuild = true;
+            }
+            return;
+        }
         if self.widgets_cursor_moved(lx, ly) {
             *needs_rebuild = true;
         }
     }
 
     fn handle_mouse_input(&mut self, button: MouseButton, state: ElementState, pos: LogicalPosition, needs_rebuild: &mut bool) -> Option<Self::Message> {
+        let lx = pos.x as f32;
+        let ly = pos.y as f32;
+        // The shared context menu a right-click on the username or password box
+        // opens takes every click while open: a row runs, a press anywhere else
+        // dismisses it. Ahead of the authenticating gate, so a menu still open
+        // when a login starts can be dismissed. The toolkit leaves this routing to
+        // the app; without it the menu could not be closed by clicking outside it,
+        // and its rows did nothing.
+        if cce_ui::widget::context_menu::is_visible() {
+            if cce_ui::widget::context_menu::mouse_input(button, state, lx, ly, Some(&mut self.ui_context)) {
+                *needs_rebuild = true;
+            }
+            return None;
+        }
         if self.is_authenticating {
             return None;
         }
-        let lx = pos.x as f32;
-        let ly = pos.y as f32;
         let mut changed = false;
         if self.widgets_mouse_input(button, state, lx, ly) {
             changed = true;
