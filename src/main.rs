@@ -413,9 +413,9 @@ impl State {
         // Root Container DISSOLVED (Phase 6ax): the card and the session list are the two
         // dispatch/walk roots; register them directly (link_parent_child used to do it as a
         // side effect of the root links).
-        ctx.register_widget(self.bg.id(), self.bg.as_ptr_mut());
-        ctx.register_widget(self.card.id(), self.card.as_ptr_mut());
-        ctx.register_widget(self.session_list.id(), self.session_list.as_ptr_mut());
+        ctx.register_host(&mut self.bg);
+        ctx.register_host(&mut self.card);
+        ctx.register_host(&mut self.session_list);
         focus::link_parent_child(&mut self.card, &mut self.username_box, ctx);
         focus::link_parent_child(&mut self.card, &mut self.password_box, ctx);
         focus::link_parent_child(&mut self.card, &mut self.login_btn, ctx);
