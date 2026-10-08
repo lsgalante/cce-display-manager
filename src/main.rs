@@ -144,9 +144,8 @@ impl cce_ui::widget::Paint for LoginCard {
 
     fn paint(&self, rect: cce_ui::scene::layout::Rect, pc: &mut cce_ui::scene::paint::PaintCtx) {
         // Only the card's header labels: the card plate (soft radial-glow blob) is drawn
-        // via custom_vertices, not the display list — and the direct all_quads read in
-        // custom_vertices relies on this paint emitting NO plain quads, like the legacy
-        // empty extra_quads. The card is laid out full-screen; the header centers off it.
+        // via custom_vertices, not the display list. The card is laid out full-screen; the
+        // header centers off it.
         let card_x = (rect.width - 360.0) / 2.0;
         let card_y = (rect.height - 300.0) / 2.0;
         pc.text("CCE DISPLAY MANAGER".to_string(), card_x + 30.0, card_y + 30.0, 15.0, [0xee, 0xee, 0xf5]);
@@ -388,17 +387,6 @@ impl State {
         }
     }
 
-    fn widgets_iter(&self) -> Vec<&dyn WidgetHost> {
-        vec![
-            &self.bg,
-            &self.card,
-            &self.username_box,
-            &self.password_box,
-            &self.login_btn,
-            &self.status_lbl,
-            &self.session_list,
-        ]
-    }
 
     /// (Re-)register the widget tree at the widgets' CURRENT addresses. `new()` cannot do
     /// this — it would capture pointers into its own stack frame that dangle once the State
@@ -775,7 +763,6 @@ impl cce_ui::engine::Application for State {
         // card — the soft radial-glow blob with the circular clip disabled — stays in
         // custom_vertices, appended on top exactly as before (it is the escape-hatch layer,
         // not part of the display-list geometry).
-        use cce_ui::scene::layout::Rect;
         self.relink_tree();
         if (self.width - size.width as f32).abs() > 0.001 || (self.height - size.height as f32).abs() > 0.001 || (self.scale - scale).abs() > 0.001 {
             self.width = size.width as f32;
@@ -788,29 +775,15 @@ impl cce_ui::engine::Application for State {
 
         let mut pc = cce_ui::scene::paint::PaintCtx::new();
 
-        for w in self.widgets_iter() {
-            let is_card = w.base().id() == self.card.id();
-            if is_card {
-                continue;
-            }
-            for (qx, qy, qw, qh, qr, qc, qcorners) in w.all_rounded_quads(&self.ui_context) {
-                let rect = Rect { x: qx, y: qy, width: qw, height: qh };
-                if qr > 0.1 {
-                    pc.rounded_rect(rect, qr, qcorners, qc);
-                } else {
-                    pc.quad(rect, qc);
-                }
-            }
-        }
-
-        for w in self.widgets_iter() {
-            let is_card = w.base().id() == self.card.id();
-            if is_card {
-                continue;
-            }
-            for (qx, qy, qw, qh, qc) in w.all_quads(&self.ui_context) {
-                pc.quad(Rect { x: qx, y: qy, width: qw, height: qh }, qc);
-            }
+        // Each root as it paints itself, through the toolkit's walk: the background, the
+        // card — and, linked under it, the username and password fields, the Log In button
+        // and the status line — and the session list. The card's own plate (the soft
+        // glow) stays in custom_vertices. (Until 2026-10-08 the widgets were drawn through
+        // the legacy tuple views — every rounded quad, then every plain quad, then the
+        // text — so the fields and the button had none of the relief every other app's
+        // controls have.)
+        for root in [&*self.bg as &dyn WidgetHost, &*self.card, &*self.session_list] {
+            cce_ui::scene::painter::paint_root_into(&self.ui_context, root, &mut pc);
         }
 
         pc.text_with(
@@ -831,13 +804,6 @@ impl cce_ui::engine::Application for State {
             None,
             None,
         );
-        // Widget text via the paint walk, over the TRUE roots (root Container dissolved,
-        // Phase 6ax): the card descends into its input children via the walk; the session
-        // list and bg are standalone leaves. Walking the flat widgets_iter would emit the
-        // card's children twice (once via descent, once as standalone roots).
-        cce_ui::scene::painter::append_widget_text(&self.ui_context, &self.bg, &mut pc);
-        cce_ui::scene::painter::append_widget_text(&self.ui_context, &self.card, &mut pc);
-        cce_ui::scene::painter::append_widget_text(&self.ui_context, &self.session_list, &mut pc);
 
         Some(pc.finish())
     }
@@ -855,14 +821,6 @@ impl cce_ui::engine::Application for State {
             v.clip_circle = [-999.0, 0.0, 0.0];
         }
         verts.extend(card_verts);
-
-        for (qx, qy, qw, qh, qc) in self.card.all_quads(&self.ui_context) {
-            let mut q_verts = quad_vertices(qx, qy, qw, qh, sw, sh, qc).to_vec();
-            for v in &mut q_verts {
-                v.clip_circle = [-999.0, 0.0, 0.0];
-            }
-            verts.extend(q_verts);
-        }
     }
 
     fn register_sources(&mut self, handle: &calloop::LoopHandle<'_, EngineState<Self>>) {
