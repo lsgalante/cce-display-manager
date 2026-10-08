@@ -1,8 +1,5 @@
 use cce_ui::widget::Owned;
-use cce_ui::widget::{
-    Button, ContentBg, WidgetHost, ElementState, MouseButton, Key, NamedKey, KeyEvent, TextBox,
-    focus, MouseScrollDelta
-};
+use cce_ui::widget::{Button, ContentBg, WidgetHost, ElementState, MouseButton, Key, NamedKey, KeyEvent, TextBox, focus, MouseScrollDelta, WidgetHostExt};
 use cce_ui::engine::{EngineState, LogicalPosition, LogicalSize, WindowSettings, Vertex, quad_vertices};
 use calloop::channel;
 
