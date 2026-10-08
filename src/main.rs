@@ -3,7 +3,6 @@ use cce_ui::widget::{
     Button, ContentBg, WidgetHost, ElementState, MouseButton, Key, NamedKey, KeyEvent, TextBox,
     focus, MouseScrollDelta
 };
-use wayland_client::QueueHandle;
 use cce_ui::engine::{EngineState, LogicalPosition, LogicalSize, WindowSettings, Vertex, quad_vertices};
 use calloop::channel;
 
@@ -645,7 +644,7 @@ impl cce_ui::engine::Application for State {
         Some(&mut self.ui_context)
     }
 
-    fn new(_qh: &QueueHandle<cce_ui::engine::EngineState<Self>>, _sender: channel::Sender<Self::Message>) -> Self {
+    fn create(_sender: cce_ui::engine::AppSender<Self::Message>) -> Self {
         let (auth_sender, auth_receiver) = channel::channel::<AuthEvent>();
 
         // Prepopulate username from last_user file if it exists
