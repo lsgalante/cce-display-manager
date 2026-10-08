@@ -1,3 +1,4 @@
+use cce_ui::widget::Owned;
 use cce_ui::widget::{
     Button, ContentBg, WidgetHost, ElementState, MouseButton, Key, NamedKey, KeyEvent, TextBox,
     focus, MouseScrollDelta
@@ -310,13 +311,13 @@ impl cce_ui::widget::Input for SessionList {
 
 // ── App State and Renderer ──
 struct State {
-    bg: cce_ui::widget::Adapted<ContentBg>,
-    card: cce_ui::widget::Adapted<LoginCard>,
-    username_box: cce_ui::widget::Adapted<TextBox>,
-    password_box: cce_ui::widget::Adapted<TextBox>,
-    login_btn: cce_ui::widget::Adapted<cce_ui::widget::Button>,
-    status_lbl: cce_ui::widget::Adapted<StatusLabel>,
-    session_list: cce_ui::widget::Adapted<SessionList>,
+    bg: Owned<cce_ui::widget::Adapted<ContentBg>>,
+    card: Owned<cce_ui::widget::Adapted<LoginCard>>,
+    username_box: Owned<cce_ui::widget::Adapted<TextBox>>,
+    password_box: Owned<cce_ui::widget::Adapted<TextBox>>,
+    login_btn: Owned<cce_ui::widget::Adapted<cce_ui::widget::Button>>,
+    status_lbl: Owned<cce_ui::widget::Adapted<StatusLabel>>,
+    session_list: Owned<cce_ui::widget::Adapted<SessionList>>,
     ui_context: cce_ui::context::UiContext,
 
 
@@ -689,13 +690,13 @@ impl cce_ui::engine::Application for State {
         session_list.selected_idx = selected_idx;
 
         let mut app = Self {
-            bg,
-            card,
-            username_box,
-            password_box,
-            login_btn,
-            status_lbl,
-            session_list,
+            bg: Owned::new(bg),
+            card: Owned::new(card),
+            username_box: Owned::new(username_box),
+            password_box: Owned::new(password_box),
+            login_btn: Owned::new(login_btn),
+            status_lbl: Owned::new(status_lbl),
+            session_list: Owned::new(session_list),
             ui_context: cce_ui::context::UiContext::new(),
             cursor_x: 0.0,
             cursor_y: 0.0,
