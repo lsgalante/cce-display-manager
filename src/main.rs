@@ -380,13 +380,13 @@ impl State {
         match field {
             Field::Username => {
                 self.ui_context.set_focused(&mut self.username_box);
-                self.password_box.unfocus();
-                self.username_box.focus();
+                self.ui_context.unfocus_widget(&mut self.password_box);
+                self.ui_context.focus_widget(&mut self.username_box);
             }
             Field::Password => {
                 self.ui_context.set_focused(&mut self.password_box);
-                self.username_box.unfocus();
-                self.password_box.focus();
+                self.ui_context.unfocus_widget(&mut self.username_box);
+                self.ui_context.focus_widget(&mut self.password_box);
             }
         }
     }
@@ -532,8 +532,8 @@ impl State {
         if button == MouseButton::Left && state == ElementState::Pressed {
             if !handled {
                 self.ui_context.clear_focus();
-                self.username_box.unfocus();
-                self.password_box.unfocus();
+                self.ui_context.unfocus_widget(&mut self.username_box);
+                self.ui_context.unfocus_widget(&mut self.password_box);
                 changed = true;
             }
         }
@@ -569,7 +569,7 @@ impl State {
             self.status_lbl.text = "Username cannot be empty".to_string();
             self.status_lbl.is_error = true;
             self.ui_context.set_focused(&mut self.username_box);
-            self.username_box.focus();
+            self.ui_context.focus_widget(&mut self.username_box);
         } else if password.is_empty() {
             if is_fprint_enabled() {
                 self.start_fprint_auth();
@@ -577,7 +577,7 @@ impl State {
                 self.status_lbl.text = "Password cannot be empty".to_string();
                 self.status_lbl.is_error = true;
                 self.ui_context.set_focused(&mut self.password_box);
-                self.password_box.focus();
+                self.ui_context.focus_widget(&mut self.password_box);
             }
         } else {
             // A typed password supersedes any fingerprint attempt still
@@ -730,8 +730,8 @@ impl cce_ui::engine::Application for State {
         let has_username = !app.username_box.text.trim().to_string().is_empty();
         let first = if has_username { Field::Password } else { Field::Username };
         match first {
-            Field::Password => app.password_box.focus(),
-            Field::Username => app.username_box.focus(),
+            Field::Password => app.ui_context.focus_widget(&mut app.password_box),
+            Field::Username => app.ui_context.focus_widget(&mut app.username_box),
         }
         app.initial_focus = Some(first);
 
@@ -916,7 +916,7 @@ impl cce_ui::engine::Application for State {
                                 app.password_box.text.clear();
                                 app.password_box.edit_buffer.clear();
                                 app.ui_context.set_focused(&mut app.password_box);
-                                app.password_box.focus();
+                                app.ui_context.focus_widget(&mut app.password_box);
                             }
                             AuthEvent::Info { msg, .. } => {
                                 app.status_lbl.text = msg;
