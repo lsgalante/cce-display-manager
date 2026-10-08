@@ -640,6 +640,13 @@ impl cce_ui::engine::Application for State {
         Some(&self.ui_context)
     }
 
+    /// Tab is the login screen's own field order (username, password) and also cycles the
+    /// session list while a field is not editing. The toolkit's Tab walk (on by default since
+    /// 2026-10-08) would take it first.
+    fn plate_navigation(&self) -> bool {
+        false
+    }
+
     fn ui_context_mut(&mut self) -> Option<&mut cce_ui::context::UiContext> {
         Some(&mut self.ui_context)
     }
