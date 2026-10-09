@@ -1,5 +1,5 @@
-use cce_ui::widget::Owned;
-use cce_ui::widget::{Button, ContentBg, WidgetHost, ElementState, MouseButton, Key, NamedKey, KeyEvent, TextBox, focus, MouseScrollDelta, WidgetHostExt};
+use cce_ui::widget::Handle;
+use cce_ui::widget::{Button, ContentBg, WidgetHost, ElementState, MouseButton, Key, NamedKey, KeyEvent, TextBox, MouseScrollDelta, WidgetHostExt};
 use cce_ui::engine::{EngineState, LogicalPosition, LogicalSize, WindowSettings, Vertex, quad_vertices};
 use calloop::channel;
 
@@ -306,13 +306,13 @@ impl cce_ui::widget::Input for SessionList {
 
 // ── App State and Renderer ──
 struct State {
-    bg: Owned<cce_ui::widget::Adapted<ContentBg>>,
-    card: Owned<cce_ui::widget::Adapted<LoginCard>>,
-    username_box: Owned<cce_ui::widget::Adapted<TextBox>>,
-    password_box: Owned<cce_ui::widget::Adapted<TextBox>>,
-    login_btn: Owned<cce_ui::widget::Adapted<cce_ui::widget::Button>>,
-    status_lbl: Owned<cce_ui::widget::Adapted<StatusLabel>>,
-    session_list: Owned<cce_ui::widget::Adapted<SessionList>>,
+    bg: Handle<cce_ui::widget::Adapted<ContentBg>>,
+    card: Handle<cce_ui::widget::Adapted<LoginCard>>,
+    username_box: Handle<cce_ui::widget::Adapted<TextBox>>,
+    password_box: Handle<cce_ui::widget::Adapted<TextBox>>,
+    login_btn: Handle<cce_ui::widget::Adapted<cce_ui::widget::Button>>,
+    status_lbl: Handle<cce_ui::widget::Adapted<StatusLabel>>,
+    session_list: Handle<cce_ui::widget::Adapted<SessionList>>,
     ui_context: cce_ui::context::UiContext,
 
 
@@ -375,14 +375,14 @@ impl State {
     fn focus_field(&mut self, field: Field) {
         match field {
             Field::Username => {
-                self.ui_context.set_focused(&mut self.username_box);
-                self.ui_context.unfocus_widget(&mut self.password_box);
-                self.ui_context.focus_widget(&mut self.username_box);
+                self.ui_context.set_focused_id(self.username_box.id());
+                self.ui_context.unfocus_id(self.password_box.id());
+                self.ui_context.focus_id(self.username_box.id());
             }
             Field::Password => {
-                self.ui_context.set_focused(&mut self.password_box);
-                self.ui_context.unfocus_widget(&mut self.username_box);
-                self.ui_context.focus_widget(&mut self.password_box);
+                self.ui_context.set_focused_id(self.password_box.id());
+                self.ui_context.unfocus_id(self.username_box.id());
+                self.ui_context.focus_id(self.password_box.id());
             }
         }
     }
@@ -398,13 +398,10 @@ impl State {
         // Root Container DISSOLVED (Phase 6ax): the card and the session list are the two
         // dispatch/walk roots; register them directly (link_parent_child used to do it as a
         // side effect of the root links).
-        ctx.register_host(&mut self.bg);
-        ctx.register_host(&mut self.card);
-        ctx.register_host(&mut self.session_list);
-        focus::link_parent_child(&mut self.card, &mut self.username_box, ctx);
-        focus::link_parent_child(&mut self.card, &mut self.password_box, ctx);
-        focus::link_parent_child(&mut self.card, &mut self.login_btn, ctx);
-        focus::link_parent_child(&mut self.card, &mut self.status_lbl, ctx);
+        ctx.link_ids(self.card.id(), self.username_box.id());
+        ctx.link_ids(self.card.id(), self.password_box.id());
+        ctx.link_ids(self.card.id(), self.login_btn.id());
+        ctx.link_ids(self.card.id(), self.status_lbl.id());
         // Initial focus, on the first frame: new() cannot register it (its widgets are
         // about to move). It used to be read back off the boxes' own `base().focused`
         // flags, which a TextBox does not keep, so the context started with NO focus —
@@ -414,25 +411,12 @@ impl State {
         }
     }
 
-    #[allow(dead_code)]
-    fn widgets_iter_mut(&mut self) -> Vec<&mut dyn WidgetHost> {
-        vec![
-            &mut self.bg,
-            &mut self.card,
-            &mut self.username_box,
-            &mut self.password_box,
-            &mut self.login_btn,
-            &mut self.status_lbl,
-            &mut self.session_list,
-        ]
-    }
-
     fn apply_layout(&mut self) {
         let sw = self.width;
         let sh = self.height;
 
         // Background spans the whole screen
-        self.bg.set_rect(0.0, 0.0, sw, sh);
+        self.ui_context[self.bg].set_rect(0.0, 0.0, sw, sh);
 
         // Center card configuration
         let card_w = 360.0;
@@ -441,7 +425,7 @@ impl State {
         let card_y = (sh - card_h) / 2.0;
         
         // Card is full screen to render aspect-ratio centered oval custom graphic
-        self.card.set_rect(0.0, 0.0, sw, sh);
+        self.ui_context[self.card].set_rect(0.0, 0.0, sw, sh);
 
         // Child components inside login card
         let content_x = card_x + 30.0;
@@ -452,22 +436,24 @@ impl State {
         let btn_h = cce_ui::layout::button_height();
 
         // Username text box
-        self.username_box.set_rect(content_x, card_y + 80.0, 300.0, tb_h + self.username_box.label_strip());
+        let strip = self.ui_context[self.username_box].label_strip();
+        self.ui_context[self.username_box].set_rect(content_x, card_y + 80.0, 300.0, tb_h + strip);
         
         // Password password box
-        self.password_box.set_rect(content_x, card_y + 145.0, 300.0, tb_h + self.password_box.label_strip());
+        let strip = self.ui_context[self.password_box].label_strip();
+        self.ui_context[self.password_box].set_rect(content_x, card_y + 145.0, 300.0, tb_h + strip);
 
         // Login button (full-width of the contents)
         let login_y = card_y + 205.0;
-        self.login_btn.set_rect(content_x, login_y, 300.0, btn_h);
+        self.ui_context[self.login_btn].set_rect(content_x, login_y, 300.0, btn_h);
 
         // Status message
-        self.status_lbl.set_rect(content_x, login_y + btn_h + 11.0, 300.0, 20.0);
+        self.ui_context[self.status_lbl].set_rect(content_x, login_y + btn_h + 11.0, 300.0, 20.0);
 
         // Session list on top left
         let list_w = 260.0;
-        let list_h = 40.0 + self.session_list.sessions.len() as f32 * 36.0;
-        self.session_list.set_rect(30.0, 30.0, list_w, list_h);
+        let list_h = 40.0 + self.ui_context[self.session_list].sessions.len() as f32 * 36.0;
+        self.ui_context[self.session_list].set_rect(30.0, 30.0, list_w, list_h);
     }
 
     pub fn widgets_cursor_moved(&mut self, cx: f32, cy: f32) -> bool {
@@ -517,8 +503,8 @@ impl State {
         if button == MouseButton::Left && state == ElementState::Pressed {
             if !handled {
                 self.ui_context.clear_focus();
-                self.ui_context.unfocus_widget(&mut self.username_box);
-                self.ui_context.unfocus_widget(&mut self.password_box);
+                self.ui_context.unfocus_id(self.username_box.id());
+                self.ui_context.unfocus_id(self.password_box.id());
                 changed = true;
             }
         }
@@ -547,22 +533,22 @@ impl State {
         changed
     }
     fn trigger_auth(&mut self) {
-        let username = self.username_box.text.trim().to_string();
-        let password = self.password_box.text.clone();
+        let username = self.ui_context[self.username_box].text.trim().to_string();
+        let password = self.ui_context[self.password_box].text.clone();
 
         if username.is_empty() {
-            self.status_lbl.text = "Username cannot be empty".to_string();
-            self.status_lbl.is_error = true;
-            self.ui_context.set_focused(&mut self.username_box);
-            self.ui_context.focus_widget(&mut self.username_box);
+            self.ui_context[self.status_lbl].text = "Username cannot be empty".to_string();
+            self.ui_context[self.status_lbl].is_error = true;
+            self.ui_context.set_focused_id(self.username_box.id());
+            self.ui_context.focus_id(self.username_box.id());
         } else if password.is_empty() {
             if is_fprint_enabled() {
                 self.start_fprint_auth();
             } else {
-                self.status_lbl.text = "Password cannot be empty".to_string();
-                self.status_lbl.is_error = true;
-                self.ui_context.set_focused(&mut self.password_box);
-                self.ui_context.focus_widget(&mut self.password_box);
+                self.ui_context[self.status_lbl].text = "Password cannot be empty".to_string();
+                self.ui_context[self.status_lbl].is_error = true;
+                self.ui_context.set_focused_id(self.password_box.id());
+                self.ui_context.focus_id(self.password_box.id());
             }
         } else {
             // A typed password supersedes any fingerprint attempt still
@@ -570,32 +556,32 @@ impl State {
             self.cancel_fprint_auth();
             self.auth_request_id += 1;
             self.auth_password = password.clone();
-            self.status_lbl.text = "Authenticating...".to_string();
-            self.status_lbl.is_error = false;
+            self.ui_context[self.status_lbl].text = "Authenticating...".to_string();
+            self.ui_context[self.status_lbl].is_error = false;
             self.is_authenticating = true;
-            self.login_btn.base_mut().label = Some("Authenticating...".to_string());
+            self.ui_context[self.login_btn].base_mut().label = Some("Authenticating...".to_string());
             authenticate_user(self.auth_request_id, username, password, self.auth_sender.clone());
         }
     }
 
     /// Start (or restart) the fingerprint attempt for the username in the box.
     fn start_fprint_auth(&mut self) {
-        let username = self.username_box.text.trim().to_string();
+        let username = self.ui_context[self.username_box].text.trim().to_string();
         self.cancel_fprint_auth();
         self.auth_request_id += 1;
         self.auth_password.clear();
-        self.status_lbl.text = "Scan finger to login or type password".to_string();
-        self.status_lbl.is_error = false;
+        self.ui_context[self.status_lbl].text = "Scan finger to login or type password".to_string();
+        self.ui_context[self.status_lbl].is_error = false;
         self.is_authenticating = true;
-        self.login_btn.base_mut().label = Some("Authenticating...".to_string());
+        self.ui_context[self.login_btn].base_mut().label = Some("Authenticating...".to_string());
         match spawn_fprint_helper(self.auth_request_id, &username, self.auth_sender.clone()) {
             Ok(child) => self.fprint_child = Some(child),
             Err(e) => {
                 log::error!("Failed to spawn fingerprint helper: {}", e);
                 self.is_authenticating = false;
-                self.login_btn.base_mut().label = Some("Log In".to_string());
-                self.status_lbl.text = "Fingerprint unavailable — type password".to_string();
-                self.status_lbl.is_error = true;
+                self.ui_context[self.login_btn].base_mut().label = Some("Log In".to_string());
+                self.ui_context[self.status_lbl].text = "Fingerprint unavailable — type password".to_string();
+                self.ui_context[self.status_lbl].is_error = true;
             }
         }
     }
@@ -680,15 +666,17 @@ impl cce_ui::engine::Application for State {
         let mut session_list = SessionList::new(sessions);
         session_list.selected_idx = selected_idx;
 
+        // The context owns the widgets; the app keeps their handles.
+        let mut ui_context = cce_ui::context::UiContext::new();
         let mut app = Self {
-            bg: Owned::new(bg),
-            card: Owned::new(card),
-            username_box: Owned::new(username_box),
-            password_box: Owned::new(password_box),
-            login_btn: Owned::new(login_btn),
-            status_lbl: Owned::new(status_lbl),
-            session_list: Owned::new(session_list),
-            ui_context: cce_ui::context::UiContext::new(),
+            bg: ui_context.insert(bg),
+            card: ui_context.insert(card),
+            username_box: ui_context.insert(username_box),
+            password_box: ui_context.insert(password_box),
+            login_btn: ui_context.insert(login_btn),
+            status_lbl: ui_context.insert(status_lbl),
+            session_list: ui_context.insert(session_list),
+            ui_context,
             cursor_x: 0.0,
             cursor_y: 0.0,
             width: 1024.0,
@@ -712,11 +700,11 @@ impl cce_ui::engine::Application for State {
         // addresses at the top of every frame instead. Only the widgets' own focus FLAGS
         // (which move with the struct) are set here; relink_tree points focused_widget at
         // the flagged box.
-        let has_username = !app.username_box.text.trim().to_string().is_empty();
+        let has_username = !app.ui_context[app.username_box].text.trim().to_string().is_empty();
         let first = if has_username { Field::Password } else { Field::Username };
         match first {
-            Field::Password => app.ui_context.focus_widget(&mut app.password_box),
-            Field::Username => app.ui_context.focus_widget(&mut app.username_box),
+            Field::Password => app.ui_context.focus_id(app.password_box.id()),
+            Field::Username => app.ui_context.focus_id(app.username_box.id()),
         }
         app.initial_focus = Some(first);
 
@@ -728,11 +716,11 @@ impl cce_ui::engine::Application for State {
         // own: three respawns in 90s were three attempts nobody asked for.
         // After a respawn the user starts it explicitly (Enter on an empty
         // password box).
-        let username = app.username_box.text.trim().to_string();
+        let username = app.ui_context[app.username_box].text.trim().to_string();
         if !username.is_empty() && is_fprint_enabled() {
             if fprint_autostart_recently() {
                 log::info!("Greeter respawned within {}s of the last fingerprint auto-start; not auto-starting", FPRINT_AUTOSTART_COOLDOWN.as_secs());
-                app.status_lbl.text = "Press Enter to scan finger, or type password".to_string();
+                app.ui_context[app.status_lbl].text = "Press Enter to scan finger, or type password".to_string();
             } else {
                 mark_fprint_autostart();
                 app.start_fprint_auth();
@@ -782,7 +770,7 @@ impl cce_ui::engine::Application for State {
         // the legacy tuple views — every rounded quad, then every plain quad, then the
         // text — so the fields and the button had none of the relief every other app's
         // controls have.)
-        for root in [&*self.bg as &dyn WidgetHost, &*self.card, &*self.session_list] {
+        for root in [&self.ui_context[self.bg] as &dyn WidgetHost, &self.ui_context[self.card], &self.ui_context[self.session_list]] {
             cce_ui::scene::painter::paint_root_into(&self.ui_context, root, &mut pc);
         }
 
@@ -816,7 +804,7 @@ impl cce_ui::engine::Application for State {
         let sw = self.width;
         let sh = self.height;
 
-        let mut card_verts = widget_vertices(&self.card, sw, sh);
+        let mut card_verts = widget_vertices(&self.ui_context[self.card], sw, sh);
         for v in &mut card_verts {
             v.clip_circle = [-999.0, 0.0, 0.0];
         }
@@ -844,12 +832,12 @@ impl cce_ui::engine::Application for State {
                             AuthEvent::Success { username, .. } => {
                                 app.fprint_child = None;
                                 app.is_authenticating = false;
-                                app.login_btn.base_mut().label = Some("Log In".to_string());
-                                app.status_lbl.text = format!("Welcome, {}!", username);
-                                app.status_lbl.is_error = false;
+                                app.ui_context[app.login_btn].base_mut().label = Some("Log In".to_string());
+                                app.ui_context[app.status_lbl].text = format!("Welcome, {}!", username);
+                                app.ui_context[app.status_lbl].is_error = false;
                                 app.login_success = true;
-                                if let Some(session) = app.session_list.selected_session() {
-                                    println!("{}", auth_success_line(app.username_box.text.trim(), &session.exec, session.is_wayland, &app.auth_password));
+                                if let Some(session) = app.ui_context[app.session_list].selected_session() {
+                                    println!("{}", auth_success_line(app.ui_context[app.username_box].text.trim(), &session.exec, session.is_wayland, &app.auth_password));
                                     std::process::exit(0);
                                 }
                             }
@@ -859,23 +847,23 @@ impl cce_ui::engine::Application for State {
                                     let _ = child.wait();
                                 }
                                 app.is_authenticating = false;
-                                app.login_btn.base_mut().label = Some("Log In".to_string());
-                                app.status_lbl.text = if was_fprint {
+                                app.ui_context[app.login_btn].base_mut().label = Some("Log In".to_string());
+                                app.ui_context[app.status_lbl].text = if was_fprint {
                                     // Raw PAM codes ("AUTHINFO_UNAVAIL") told the
                                     // user nothing, least of all how to retry.
                                     format!("{} — press Enter to scan again, or type password", fprint_failure_text(&err_msg))
                                 } else {
                                     password_failure_text(&err_msg)
                                 };
-                                app.status_lbl.is_error = true;
-                                app.password_box.text.clear();
-                                app.password_box.edit_buffer.clear();
-                                app.ui_context.set_focused(&mut app.password_box);
-                                app.ui_context.focus_widget(&mut app.password_box);
+                                app.ui_context[app.status_lbl].is_error = true;
+                                app.ui_context[app.password_box].text.clear();
+                                app.ui_context[app.password_box].edit_buffer.clear();
+                                app.ui_context.set_focused_id(app.password_box.id());
+                                app.ui_context.focus_id(app.password_box.id());
                             }
                             AuthEvent::Info { msg, .. } => {
-                                app.status_lbl.text = msg;
-                                app.status_lbl.is_error = false;
+                                app.ui_context[app.status_lbl].text = msg;
+                                app.ui_context[app.status_lbl].is_error = false;
                             }
                         }
                         redraw = true;
@@ -930,7 +918,7 @@ impl cce_ui::engine::Application for State {
             changed = true;
         }
         if button == MouseButton::Left && state == ElementState::Pressed {
-            if self.login_btn.take_click() {
+            if self.ui_context[self.login_btn].take_click() {
                 self.trigger_auth();
                 changed = true;
             }
@@ -973,8 +961,8 @@ impl cce_ui::engine::Application for State {
                     Ok(()) => (action.progress().to_string(), false),
                     Err(e) => (format!("Could not {}: {}", action.verb(), e), true),
                 };
-                self.status_lbl.text = text;
-                self.status_lbl.is_error = is_error;
+                self.ui_context[self.status_lbl].text = text;
+                self.ui_context[self.status_lbl].is_error = is_error;
                 *needs_rebuild = true;
                 return None;
             }
@@ -993,7 +981,7 @@ impl cce_ui::engine::Application for State {
             // If we are currently in fingerprint authentication and the user starts typing a password,
             // cancel the fingerprint auth and let them type.
             if self.is_authenticating {
-                if self.password_box.text.is_empty() {
+                if self.ui_context[self.password_box].text.is_empty() {
                     let is_typing = !ctrl_pressed && match logical_key {
                         Key::Character(_) | Key::Named(NamedKey::Backspace) | Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Space) => true,
                         _ => false,
@@ -1002,9 +990,9 @@ impl cce_ui::engine::Application for State {
                         self.cancel_fprint_auth();
                         self.auth_request_id += 1;
                         self.is_authenticating = false;
-                        self.login_btn.base_mut().label = Some("Log In".to_string());
-                        self.status_lbl.text = "Enter password to start".to_string();
-                        self.status_lbl.is_error = false;
+                        self.ui_context[self.login_btn].base_mut().label = Some("Log In".to_string());
+                        self.ui_context[self.status_lbl].text = "Enter password to start".to_string();
+                        self.ui_context[self.status_lbl].is_error = false;
                     } else {
                         let is_nav = match logical_key {
                             Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => true,
@@ -1022,18 +1010,18 @@ impl cce_ui::engine::Application for State {
             let mut changed = false;
 
             // Handle Up/Down or Ctrl+P/N navigation to cycle sessions
-            let cycle_up = (logical_key == &Key::Named(NamedKey::ArrowUp) || is_ctrl_p) && !self.session_list.sessions.is_empty();
-            let cycle_down = (logical_key == &Key::Named(NamedKey::ArrowDown) || is_ctrl_n) && !self.session_list.sessions.is_empty();
+            let cycle_up = (logical_key == &Key::Named(NamedKey::ArrowUp) || is_ctrl_p) && !self.ui_context[self.session_list].sessions.is_empty();
+            let cycle_down = (logical_key == &Key::Named(NamedKey::ArrowDown) || is_ctrl_n) && !self.ui_context[self.session_list].sessions.is_empty();
 
             if cycle_up {
-                let len = self.session_list.sessions.len();
-                self.session_list.selected_idx = (self.session_list.selected_idx + len - 1) % len;
-                self.session_list.hovered_idx = None;
+                let len = self.ui_context[self.session_list].sessions.len();
+                self.ui_context[self.session_list].selected_idx = (self.ui_context[self.session_list].selected_idx + len - 1) % len;
+                self.ui_context[self.session_list].hovered_idx = None;
                 changed = true;
             } else if cycle_down {
-                let len = self.session_list.sessions.len();
-                self.session_list.selected_idx = (self.session_list.selected_idx + 1) % len;
-                self.session_list.hovered_idx = None;
+                let len = self.ui_context[self.session_list].sessions.len();
+                self.ui_context[self.session_list].selected_idx = (self.ui_context[self.session_list].selected_idx + 1) % len;
+                self.ui_context[self.session_list].hovered_idx = None;
                 changed = true;
             } else if logical_key == &Key::Named(NamedKey::Tab) {
                 let next = match self.focused_field() {
@@ -1057,7 +1045,7 @@ impl cce_ui::engine::Application for State {
                     let kev = cce_ui::widget::Event::KeyInput(event.clone());
                     let _ = self.ui_context.propagate_event(&kev, root);
                 }
-                if field == Some(Field::Username) && self.password_box.text.is_empty() {
+                if field == Some(Field::Username) && self.ui_context[self.password_box].text.is_empty() {
                     self.focus_field(Field::Password);
                 } else {
                     self.trigger_auth();
