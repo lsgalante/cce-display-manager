@@ -82,20 +82,13 @@ fn sanitize_exec(exec: &str) -> (String, Vec<String>) {
 
 fn parse_desktop_file(path: &std::path::Path, is_wayland: bool) -> Result<Session, std::io::Error> {
     let content = std::fs::read_to_string(path)?;
-    let mut name = None;
-    let mut exec = None;
-    for line in content.lines() {
-        let line = line.trim();
-        if line.starts_with("Name=") {
-            name = Some(line["Name=".len()..].to_string());
-        } else if line.starts_with("Exec=") {
-            exec = Some(line["Exec=".len()..].to_string());
-        }
-    }
-    if let (Some(n), Some(e)) = (name, exec) {
-        Ok(Session { name: n, exec: e, is_wayland })
-    } else {
-        Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid desktop file"))
+    // The [Desktop Entry] group only: the last Name=/Exec= anywhere in the
+    // file used to win, so a session file with an action group named the
+    // session after its last action.
+    let entry = cce_ui::desktop_entry::DesktopEntry::parse(&content);
+    match (entry.get("Name"), entry.get("Exec")) {
+        (Some(n), Some(e)) => Ok(Session { name: n.to_string(), exec: e.to_string(), is_wayland }),
+        _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid desktop file")),
     }
 }
 
