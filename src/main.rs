@@ -1943,7 +1943,7 @@ fn launch_session(
     use std::io::{BufRead, Write};
     log::info!("Launching user session Exec: '{}' (Wayland: {}) for user: '{}'", exec, is_wayland, username);
     // A stale flag from a previous session must not trigger a phantom relaunch.
-    let flag_path = format!("/tmp/cce-restart-requested-{}", username);
+    let flag_path = cce_ui::ipc::ctl::restart_flag(&username);
     let _ = std::fs::remove_file(&flag_path);
 
     ensure_vt_active(tty_name);
