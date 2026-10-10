@@ -764,7 +764,7 @@ impl cce_ui::engine::Application for State {
         // text — so the fields and the button had none of the relief every other app's
         // controls have.)
         for root in [&self.ui_context[self.bg] as &dyn WidgetHost, &self.ui_context[self.card], &self.ui_context[self.session_list]] {
-            cce_ui::scene::painter::paint_root_into(&self.ui_context, root, &mut pc);
+            cce_ui::widget::painter::paint_root_into(&self.ui_context, root, &mut pc);
         }
 
         pc.text_with(
