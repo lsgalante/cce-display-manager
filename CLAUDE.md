@@ -160,6 +160,12 @@ Rollback is Ctrl+Alt+F2 (logind's auto-VTs), restore the `.bak`, reboot.
 
 ## Known gaps
 
+- The login card's plate is the shader's "wavy blob" (`shader2d.wgsl`, a circle clip
+  whose `x` is -999), drawn last of the display list by `paint_card_blob`. The
+  tessellator scales a circle clip by the frame's scale, so the sentinel goes in
+  pre-divided (`blob_clip_x`), and at the scales where no f32 scales back onto -999
+  exactly (1.2, 1.4, 1.75, 3.5, …) the blob is left out rather than drawn as a flat
+  veil. cce-ui has no blob prim; with one, both go.
 - `WLR_DRM_DEVICES=/dev/dri/card1:/dev/dri/card0` for the greeter's cage is
   this machine's card numbering, hard-coded; `startcce` pins card1 the same way.
 - `busctl monitor` (the resume watchdog) and `chvt` / `loginctl` are shelled

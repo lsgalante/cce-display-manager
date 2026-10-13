@@ -1,19 +1,39 @@
 use cce_ui::widget::Handle;
 use cce_ui::widget::{Button, ContentBg, WidgetHost, ElementState, MouseButton, Key, NamedKey, KeyEvent, TextBox, MouseScrollDelta, WidgetHostExt};
-use cce_ui::engine::{EngineState, LogicalPosition, LogicalSize, WindowSettings, Vertex, quad_vertices};
+use cce_ui::engine::{EngineState, LogicalPosition, LogicalSize, WindowSettings};
+use cce_ui::scene::layout::Rect;
+use cce_ui::scene::paint::PaintCtx;
 use calloop::channel;
 
+/// The shader's "wavy blob" sentinel (`shader2d.wgsl`: a vertex whose circle clip has
+/// `x == -999` draws a rippled, fading oval centred on the surface, sized to it in NDC,
+/// in place of its own rect).
+const BLOB_SENTINEL: f32 = -999.0;
 
-
-
-
-fn widget_vertices(w: &dyn WidgetHost, sw: f32, sh: f32) -> Vec<Vertex> {
-    let (x, y, ww, h) = w.rect();
-    quad_vertices(x, y, ww, h, sw, sh, w.color()).to_vec()
+/// The circle-clip `x` that comes out of the tessellator as exactly [`BLOB_SENTINEL`]. It
+/// scales a circle clip by the frame's scale, in f32 (`tessellate_display_list`), so the
+/// sentinel goes in pre-divided; `(-999 / s) * s` is not always -999 in f32, so the
+/// neighbouring floats are tried too. `None` at the scales where no f32 lands on it
+/// exactly (1.2, 1.4, 1.75, 3.5, …): there the shader would not see the sentinel and
+/// would fill the whole quad flat.
+fn blob_clip_x(scale: f32) -> Option<f32> {
+    let guess = BLOB_SENTINEL / scale;
+    (-8i32..=8)
+        .map(|k| f32::from_bits(guess.to_bits().wrapping_add_signed(k)))
+        .find(|x| *x * scale == BLOB_SENTINEL)
 }
 
-
-
+/// The login card's plate: the soft rippled blob centred on the screen — a quad over the
+/// card's rect (laid out full-screen), in the card's colour, under the blob sentinel.
+/// Emitted LAST of the frame's geometry, so it lies over every plate (the fields, the
+/// button, the session list) as the `Application::custom_vertices` batch it replaces did,
+/// with the text drawn over it. At a scale with no exact sentinel ([`blob_clip_x`]) the
+/// card is left out: a flat full-screen veil would be worse than no blob.
+fn paint_card_blob(pc: &mut PaintCtx, rect: Rect, color: [f32; 4], scale: f32) {
+    if let Some(x) = blob_clip_x(scale) {
+        pc.clip_circle([x, 0.0, 0.0], |pc| pc.quad(rect, color));
+    }
+}
 
 #[derive(Debug, Clone)]
 struct Session {
@@ -136,9 +156,9 @@ impl cce_ui::widget::Paint for LoginCard {
     fn color(&self) -> [f32; 4] { [0.25, 0.25, 0.28, 0.75] } // Premium gray card background with transparency
 
     fn paint(&self, rect: cce_ui::scene::layout::Rect, pc: &mut cce_ui::scene::paint::PaintCtx) {
-        // Only the card's header labels: the card plate (soft radial-glow blob) is drawn
-        // via custom_vertices, not the display list. The card is laid out full-screen; the
-        // header centers off it.
+        // Only the card's header labels: the card plate (the soft rippled blob) is drawn
+        // last of the frame by `paint_card_blob`, over the fields. The card is laid out
+        // full-screen; the header centers off it.
         let card_x = (rect.width - 360.0) / 2.0;
         let card_y = (rect.height - 300.0) / 2.0;
         pc.text("CCE DISPLAY MANAGER".to_string(), card_x + 30.0, card_y + 30.0, 15.0, [0xee, 0xee, 0xf5]);
@@ -739,11 +759,8 @@ impl cce_ui::engine::Application for State {
     fn tick(&mut self, _dt: f32, _needs_rebuild: &mut bool) {}
 
     fn display_list(&mut self, size: LogicalSize, scale: f64) -> Option<cce_ui::scene::paint::DisplayList> {
-        // Phase 6ah single paint path: the widget geometry (the legacy view_rounded_quads
-        // then view() bodies, in the wrapper's order) and all text are this one list. The
-        // card — the soft radial-glow blob with the circular clip disabled — stays in
-        // custom_vertices, appended on top exactly as before (it is the escape-hatch layer,
-        // not part of the display-list geometry).
+        // The single paint path: the widgets, the card's blob over them and all text are
+        // this one list.
         self.relink_tree();
         if (self.width - size.width as f32).abs() > 0.001 || (self.height - size.height as f32).abs() > 0.001 || (self.scale - scale).abs() > 0.001 {
             self.width = size.width as f32;
@@ -759,7 +776,7 @@ impl cce_ui::engine::Application for State {
         // Each root as it paints itself, through the toolkit's walk: the background, the
         // card — and, linked under it, the username and password fields, the Log In button
         // and the status line — and the session list. The card's own plate (the soft
-        // glow) stays in custom_vertices. (Until 2026-10-08 the widgets were drawn through
+        // blob) comes last, below. (Until 2026-10-08 the widgets were drawn through
         // the legacy tuple views — every rounded quad, then every plain quad, then the
         // text — so the fields and the button had none of the relief every other app's
         // controls have.)
@@ -786,22 +803,17 @@ impl cce_ui::engine::Application for State {
             None,
         );
 
+        // The card's blob, the last geometry of the frame (text is drawn after all of it).
+        // It was the `custom_vertices` batch until 2026-10-12.
+        let card = &self.ui_context[self.card];
+        let (x, y, width, height) = card.rect();
+        paint_card_blob(&mut pc, Rect { x, y, width, height }, card.color(), scale as f32);
+
         Some(pc.finish())
     }
 
     fn display_list_text(&self) -> bool {
         true
-    }
-
-    fn custom_vertices(&mut self, verts: &mut Vec<Vertex>, _size: LogicalSize, _scale: f64) {
-        let sw = self.width;
-        let sh = self.height;
-
-        let mut card_verts = widget_vertices(&self.ui_context[self.card], sw, sh);
-        for v in &mut card_verts {
-            v.clip_circle = [-999.0, 0.0, 0.0];
-        }
-        verts.extend(card_verts);
     }
 
     fn register_sources(&mut self, handle: &calloop::LoopHandle<'_, EngineState<Self>>) {
@@ -2454,6 +2466,56 @@ mod tests {
     fn auth_success_bad_bool_defaults_wayland() {
         let got = parse_auth_success("AUTH_SUCCESS|lucas|startcce|banana|pw");
         assert_eq!(got.map(|t| t.2), Some(true));
+    }
+
+    /// The card's blob reaches the renderer as the `custom_vertices` batch it replaced
+    /// did: the same six vertices (the card's full-screen quad in its colour, the -999
+    /// sentinel in every circle clip), last of the frame, in an unclipped flat batch.
+    #[test]
+    fn card_blob_tessellates_to_the_old_custom_vertices() {
+        use cce_ui::backend::window_runner::tessellate_display_list;
+        use cce_ui::scene::layout::Rect;
+        use cce_ui::scene::paint::PaintCtx;
+        let (sw, sh) = (1280.0f32, 800.0f32);
+        let color = [0.25, 0.25, 0.28, 0.75];
+        for scale in [1.0f32, 1.25, 1.5, 2.0, 3.0] {
+            let mut pc = PaintCtx::new();
+            pc.quad(Rect { x: 10.0, y: 10.0, width: 50.0, height: 50.0 }, [1.0; 4]);
+            super::paint_card_blob(&mut pc, Rect { x: 0.0, y: 0.0, width: sw, height: sh }, color, scale);
+            let dl = pc.finish();
+            let (verts, batches, _, _) = tessellate_display_list(&dl, sw, sh, scale);
+            // What `custom_vertices` appended: widget_vertices + the sentinel.
+            let mut want = cce_ui::engine::quad_vertices(0.0, 0.0, sw, sh, sw, sh, color);
+            for v in &mut want {
+                v.clip_circle = [-999.0, 0.0, 0.0];
+            }
+            assert!(verts.len() >= 6);
+            let got = &verts[verts.len() - 6..];
+            for (g, w) in got.iter().zip(want.iter()) {
+                assert_eq!(g.position, w.position, "scale {scale}");
+                assert_eq!(g.color, w.color, "scale {scale}");
+                assert_eq!(g.clip_circle, w.clip_circle, "scale {scale}");
+            }
+            let last = batches.last().expect("a batch");
+            assert_eq!(last.end as usize, verts.len(), "the blob is the frame's last geometry");
+            assert!(last.scissor.is_none() && last.clip_rrect.is_none() && last.plate.is_none() && !last.blur_behind);
+        }
+    }
+
+    /// Where no f32 scales onto the sentinel, the blob is left out rather than drawn as
+    /// a flat veil over the whole screen.
+    #[test]
+    fn no_blob_where_the_sentinel_cannot_be_hit() {
+        use cce_ui::scene::layout::Rect;
+        use cce_ui::scene::paint::PaintCtx;
+        assert_eq!(super::blob_clip_x(1.0), Some(-999.0));
+        assert_eq!(super::blob_clip_x(2.0), Some(-499.5));
+        for s in [1.2f32, 1.4, 1.75, 3.5] {
+            assert_eq!(super::blob_clip_x(s), None, "scale {s}");
+            let mut pc = PaintCtx::new();
+            super::paint_card_blob(&mut pc, Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 }, [0.5; 4], s);
+            assert!(pc.finish().items.is_empty(), "scale {s}");
+        }
     }
 }
 
