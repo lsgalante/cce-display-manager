@@ -1,5 +1,5 @@
 use cce_ui::widget::Handle;
-use cce_ui::widget::{Button, ContentBg, WidgetHost, ElementState, MouseButton, Key, NamedKey, KeyEvent, TextBox, MouseScrollDelta, WidgetHostExt};
+use cce_ui::widget::{Button, ContentBg, WidgetHost, ElementState, MouseButton, Key, NamedKey, KeyEvent, TextBox, MouseScrollDelta, WidgetEvent, WidgetHostExt};
 use cce_ui::engine::{EngineState, LogicalPosition, LogicalSize, WindowSettings};
 use cce_ui::scene::layout::Rect;
 use cce_ui::scene::paint::PaintCtx;
@@ -545,6 +545,31 @@ impl State {
         }
         changed
     }
+
+    /// Act on what the widgets reported since the last sweep (`UiContext::take_events`): a
+    /// click on Log In starts the login. Run after every dispatch path, pointer and key, so
+    /// a click is heard on the release that makes it. (The poll it replaces ran on presses
+    /// only, and a Button clicks on release, so a click on Log In waited for the next
+    /// press anywhere — and then logged in from wherever that press landed.) Returns
+    /// whether it acted.
+    fn drain_widget_events(&mut self) -> bool {
+        let mut login = false;
+        for (id, ev) in self.ui_context.take_events() {
+            match ev {
+                WidgetEvent::Clicked if id == self.login_btn.id() => login = true,
+                _ => {}
+            }
+        }
+        // No click arrives while an attempt runs (the pointer path stops at
+        // `is_authenticating`; the key path lets only navigation through, which reaches
+        // no widget); the guard keeps it that way if one ever does.
+        if login && !self.is_authenticating {
+            self.trigger_auth();
+            return true;
+        }
+        false
+    }
+
     fn trigger_auth(&mut self) {
         let username = self.ui_context[self.username_box].text.trim().to_string();
         let password = self.ui_context[self.password_box].text.clone();
@@ -922,11 +947,8 @@ impl cce_ui::engine::Application for State {
         if self.widgets_mouse_input(button, state, lx, ly) {
             changed = true;
         }
-        if button == MouseButton::Left && state == ElementState::Pressed {
-            if self.ui_context[self.login_btn].take_click() {
-                self.trigger_auth();
-                changed = true;
-            }
+        if self.drain_widget_events() {
+            changed = true;
         }
         if changed {
             *needs_rebuild = true;
@@ -1060,6 +1082,11 @@ impl cce_ui::engine::Application for State {
                 if self.widgets_keyboard_input(event) {
                     changed = true;
                 }
+            }
+            // A key can click too: Space on a focused Log In (an assistive tool's press
+            // focuses it and sends one).
+            if self.drain_widget_events() {
+                changed = true;
             }
 
             if changed {
