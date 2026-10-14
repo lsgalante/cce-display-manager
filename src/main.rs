@@ -116,7 +116,7 @@ fn discover_sessions() -> Vec<Session> {
     let mut sessions = Vec::new();
     if let Ok(entries) = std::fs::read_dir("/usr/share/wayland-sessions") {
         for entry in entries.flatten() {
-            if entry.path().extension().map_or(false, |ext| ext == "desktop") {
+            if entry.path().extension().is_some_and(|ext| ext == "desktop") {
                 if let Ok(s) = parse_desktop_file(&entry.path(), true) {
                     sessions.push(s);
                 }
@@ -125,7 +125,7 @@ fn discover_sessions() -> Vec<Session> {
     }
     if let Ok(entries) = std::fs::read_dir("/usr/share/xsessions") {
         for entry in entries.flatten() {
-            if entry.path().extension().map_or(false, |ext| ext == "desktop") {
+            if entry.path().extension().is_some_and(|ext| ext == "desktop") {
                 if let Ok(s) = parse_desktop_file(&entry.path(), false) {
                     sessions.push(s);
                 }
@@ -303,12 +303,11 @@ impl cce_ui::widget::Input for SessionList {
             } => {
                 for i in 0..self.sessions.len() {
                     let (ix, iy, iw, ih) = self.item_rect(ectx.rect, i);
-                    if *x >= ix && *x <= ix + iw && *y >= iy && *y <= iy + ih {
-                        if self.selected_idx != i {
+                    if *x >= ix && *x <= ix + iw && *y >= iy && *y <= iy + ih
+                        && self.selected_idx != i {
                             self.selected_idx = i;
                             return true;
                         }
-                    }
                 }
                 false
             }
@@ -513,14 +512,13 @@ impl State {
         let card_root = self.card.id();
         let handled = self.ui_context.propagate_event(&event, sl_root)
             || self.ui_context.propagate_event(&event, card_root);
-        if button == MouseButton::Left && state == ElementState::Pressed {
-            if !handled {
+        if button == MouseButton::Left && state == ElementState::Pressed
+            && !handled {
                 self.ui_context.clear_focus();
                 self.ui_context.unfocus_id(self.username_box.id());
                 self.ui_context.unfocus_id(self.password_box.id());
                 changed = true;
             }
-        }
         if handled {
             changed = true;
         }
@@ -528,7 +526,6 @@ impl State {
     }
 
     pub fn widgets_keyboard_input(&mut self, event: &KeyEvent) -> bool {
-        let mut changed = false;
         let ui_event = cce_ui::widget::Event::KeyInput(event.clone());
         // Fully short-circuited (the 6ac rule): every propagate call delivers KeyInput
         // to the ctx-focused widget first, so a non-short-circuited chain would insert
@@ -536,14 +533,9 @@ impl State {
         let bg_root = self.bg.id();
         let sl_root = self.session_list.id();
         let card_root = self.card.id();
-        if self.ui_context.propagate_event(&ui_event, bg_root) {
-            changed = true;
-        } else if self.ui_context.propagate_event(&ui_event, sl_root) {
-            changed = true;
-        } else if self.ui_context.propagate_event(&ui_event, card_root) {
-            changed = true;
-        }
-        changed
+        self.ui_context.propagate_event(&ui_event, bg_root)
+            || self.ui_context.propagate_event(&ui_event, sl_root)
+            || self.ui_context.propagate_event(&ui_event, card_root)
     }
 
     /// Act on what the widgets reported since the last sweep (`UiContext::take_events`): a
@@ -787,9 +779,9 @@ impl cce_ui::engine::Application for State {
         // The single paint path: the widgets, the card's blob over them and all text are
         // this one list.
         self.relink_tree();
-        if (self.width - size.width as f32).abs() > 0.001 || (self.height - size.height as f32).abs() > 0.001 || (self.scale - scale).abs() > 0.001 {
-            self.width = size.width as f32;
-            self.height = size.height as f32;
+        if (self.width - size.width).abs() > 0.001 || (self.height - size.height).abs() > 0.001 || (self.scale - scale).abs() > 0.001 {
+            self.width = size.width;
+            self.height = size.height;
             self.physical_width = (size.width * scale as f32) as u32;
             self.physical_height = (size.height * scale as f32) as u32;
             self.scale = scale;
@@ -908,8 +900,8 @@ impl cce_ui::engine::Application for State {
     }
 
     fn handle_pointer_move(&mut self, pos: LogicalPosition, needs_rebuild: &mut bool) {
-        let lx = pos.x as f32;
-        let ly = pos.y as f32;
+        let lx = pos.x;
+        let ly = pos.y;
         self.cursor_x = lx;
         self.cursor_y = ly;
         // The shared context menu (the username / password box's) gets the
@@ -926,8 +918,8 @@ impl cce_ui::engine::Application for State {
     }
 
     fn handle_mouse_input(&mut self, button: MouseButton, state: ElementState, pos: LogicalPosition, needs_rebuild: &mut bool) -> Option<Self::Message> {
-        let lx = pos.x as f32;
-        let ly = pos.y as f32;
+        let lx = pos.x;
+        let ly = pos.y;
         // The shared context menu a right-click on the username or password box
         // opens takes every click while open: a row runs, a press anywhere else
         // dismisses it. Ahead of the authenticating gate, so a menu still open
@@ -1009,10 +1001,8 @@ impl cce_ui::engine::Application for State {
             // cancel the fingerprint auth and let them type.
             if self.is_authenticating {
                 if self.ui_context[self.password_box].text.is_empty() {
-                    let is_typing = !ctrl_pressed && match logical_key {
-                        Key::Character(_) | Key::Named(NamedKey::Backspace) | Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Space) => true,
-                        _ => false,
-                    };
+                    let is_typing = !ctrl_pressed
+                        && matches!(logical_key, Key::Character(_) | Key::Named(NamedKey::Backspace) | Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Space));
                     if is_typing {
                         self.cancel_fprint_auth();
                         self.auth_request_id += 1;
@@ -1415,14 +1405,13 @@ extern "C" fn pam_conversation_fn(
             } else if style == pam_sys::PamMessageStyle::PROMPT_ECHO_OFF as libc::c_int {
                 let pass_c = std::ffi::CString::new(data.password.clone()).unwrap_or_default();
                 r.resp = libc::strdup(pass_c.as_ptr());
-            } else if style == pam_sys::PamMessageStyle::ERROR_MSG as libc::c_int || style == pam_sys::PamMessageStyle::TEXT_INFO as libc::c_int {
-                if !m.msg.is_null() {
+            } else if (style == pam_sys::PamMessageStyle::ERROR_MSG as libc::c_int || style == pam_sys::PamMessageStyle::TEXT_INFO as libc::c_int)
+                && !m.msg.is_null() {
                     let msg_str = std::ffi::CStr::from_ptr(m.msg).to_string_lossy().into_owned();
                     if let Some(ref sender) = data.sender {
                         let _ = sender.send(AuthEvent::Info { request_id: data.request_id, msg: msg_str });
                     }
                 }
-            }
         }
     }
 
@@ -1480,7 +1469,7 @@ impl PamSession {
         if rc == 0 {
             Ok(())
         } else {
-            Err(unsafe { std::mem::transmute(rc as u8) })
+            Err(unsafe { std::mem::transmute::<u8, pam_sys::PamReturnCode>(rc as u8) })
         }
     }
 
@@ -1676,23 +1665,28 @@ fn run_daemon() {
 
         use std::io::BufRead;
         for line in reader.lines() {
-            if let Ok(line_str) = line {
-                if line_str.starts_with("AUTH_SUCCESS|") {
-                    if let Some((username, exec, is_wayland, password)) = parse_auth_success(&line_str) {
-                        log::info!("[greeter-stdout] AUTH_SUCCESS|{}|{}|{}", username, exec, is_wayland);
-                        auth_success = Some((username, exec, is_wayland, password));
-                        // Don't read to EOF: the greeter has already exited,
-                        // but cage can linger indefinitely after its child is
-                        // gone (observed wedged until a manual VT switch — the
-                        // "login hangs until Ctrl+Alt+F2" failure). Stop
-                        // reading and terminate it ourselves below.
-                        break;
-                    }
-                    // Never echo the raw line: field 5 is the password.
-                    log::warn!("[greeter-stdout] malformed AUTH_SUCCESS line (redacted); login attempt dropped");
-                } else {
-                    log::info!("[greeter-stdout] {}", line_str);
+            let line_str = match line {
+                Ok(l) => l,
+                // Not UTF-8: skipped (its bytes are consumed). Any other error
+                // ends the read like EOF; retrying it would spin.
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => continue,
+                Err(_) => break,
+            };
+            if line_str.starts_with("AUTH_SUCCESS|") {
+                if let Some((username, exec, is_wayland, password)) = parse_auth_success(&line_str) {
+                    log::info!("[greeter-stdout] AUTH_SUCCESS|{}|{}|{}", username, exec, is_wayland);
+                    auth_success = Some((username, exec, is_wayland, password));
+                    // Don't read to EOF: the greeter has already exited,
+                    // but cage can linger indefinitely after its child is
+                    // gone (observed wedged until a manual VT switch — the
+                    // "login hangs until Ctrl+Alt+F2" failure). Stop
+                    // reading and terminate it ourselves below.
+                    break;
                 }
+                // Never echo the raw line: field 5 is the password.
+                log::warn!("[greeter-stdout] malformed AUTH_SUCCESS line (redacted); login attempt dropped");
+            } else {
+                log::info!("[greeter-stdout] {}", line_str);
             }
         }
 
@@ -2023,7 +2017,7 @@ fn launch_session(
         use std::os::unix::fs::MetadataExt;
         let owner_ok = meta.file_type().is_file()
             && users::get_user_by_name(&username)
-                .map_or(false, |u| u.uid() == meta.uid());
+                .is_some_and(|u| u.uid() == meta.uid());
         let _ = std::fs::remove_file(&flag_path);
         if owner_ok {
             *pending_relaunch = Some((username, exec, is_wayland));
